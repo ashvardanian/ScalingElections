@@ -1,11 +1,10 @@
-import random
 from typing import Sequence, Tuple, List
 
 import numpy as np
 from numba import njit, prange, get_num_threads
 
-from scaling_democracy import log_gpus
-from scaling_democracy import compute_strongest_paths
+from scaling_democracy import log_gpus  # type: ignore
+from scaling_democracy import compute_strongest_paths  # type: ignore
 
 
 @njit
@@ -381,6 +380,7 @@ if __name__ == "__main__":
             print(f"↷ Skipping {name}")
             continue
 
+        print(f"→ Starting warm-up: {name}")
         try:
             start_time = time.time()
             sub_preferences_result = callback(sub_preferences)
@@ -389,7 +389,7 @@ if __name__ == "__main__":
             print(f"✘ Error: {name} raised an exception: {e}")
             continue
 
-        print(f"{name} warm-up: {elapsed_time:.4f} secs")
+        print(f"- {name} took: {elapsed_time:.4f} secs")
         if not np.array_equal(sub_preferences_result, sub_preferences_baseline):
             print(f"✘ Error: {name} returned different results from Numba baseline")
         else:
