@@ -42,7 +42,7 @@
                 "-g",
                 "-O0",
                 "--std=c++17",
-                "-DSCALE_DEMOCRACY_TEST"
+                "-DSCALING_DEMOCRACY_TEST"
             ],
             "group": {
                 "kind": "build",

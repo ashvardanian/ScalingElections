@@ -1,12 +1,21 @@
 {
     "cSpell.words": [
+        "alignas",
+        "constexpr",
         "CUDA",
         "dtype",
+        "forceinline",
+        "memcpy",
         "ndarray",
+        "njit",
+        "nullptr",
         "numba",
         "openmp",
         "prange",
         "schulze",
+        "syncthreads",
+        "tparam",
+        "Vardanian",
         "Warshall"
     ],
     "files.associations": {
@@ -85,6 +94,7 @@
         "typeinfo": "cpp",
         "variant": "cpp",
         "expected": "cpp",
-        "format": "cpp"
+        "format": "cpp",
+        "__config": "cpp"
     }
 }
