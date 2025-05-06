@@ -121,7 +121,7 @@ class BuildExt(build_ext):
             raise RuntimeError(f"nvcc compilation of {source} failed")
 
 
-__version__ = "0.0.1"
+__version__ = "0.2.0"
 
 long_description = ""
 this_directory = os.path.abspath(os.path.dirname(__file__))
@@ -141,7 +141,6 @@ ext_modules = [
             np.get_include(),
             get_python_inc(),
             "/usr/local/cuda/include/",
-            "/usr/include/cuda/",
         ],
         library_dirs=[
             "/usr/local/cuda/lib64",
@@ -173,7 +172,6 @@ setup(
     description="GPU-accelerated Schulze voting algorithm",
     long_description=long_description,
     ext_modules=ext_modules,
-    extras_require={"test": "pytest"},
     cmdclass={"build_ext": BuildExt},
     zip_safe=False,
     python_requires=">=3.7",

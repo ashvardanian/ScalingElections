@@ -1,25 +1,48 @@
+# Scaling Democracy with GPUs
+
 ![Scaling Democracy Thumbnail](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/scaling-democracy.jpg?raw=true)
 
 This repository implements the Schulze voting algorithm using CUDA for hardware acceleration.
 That algorithm is often used by Pirate Parties and open-source foundations, and it's a good example of a combinatorial problem that can be parallelized efficiently on GPUs.
 It's built as a single `scaling_democracy.cu` CUDA file, wrapped with PyBind11, and compiled __without__ CMake directly from the `setup.py`.
-To pull, build and benchmark locally:
+
+## Usage
+
+Pull:
 
 ```sh
 git clone https://github.com/ashvardanian/scaling-democracy.git
 cd scaling-democracy
-git submodule update --init --recursive
-pip install pybind11 numpy numba cupy-cuda12x pycuda
-pip install -e .
-python benchmark.py --num-candidates 128 --num-voters 128 --run-openmp --run-numba --run-serial --run-cuda
 ```
 
-It's a fun project by itself.
-It might be a good example of using GPUs for combinatorial problems with order-dependant traversal and also a good starting point for single-day CUDA hacking experiences with the header-only [CCCL](https://github.com/NVIDIA/cccl), containing Thrust, CUB, and `libcudacxx`.
+Build the environment and run with `uv`:
+
+```sh
+uv venv -p python3.12 .   # Pick a recent Python version
+uv sync --extra dev       # Build locally and install dependencies
+uv run benchmark.py       # Run the default problem size
+```
+
+Alternatively, with your local environment:
+
+```sh
+pip install -e .         # Build locally and install dependencies
+python benchmark.py      # Run the default problem size
+```
+
+Or with custom parameters:
+
+```sh
+uv run benchmark.py \
+--num-candidates 1024 \
+--num-voters 1024 \
+--tile-size 16 \
+--run-openmp --run-numba --run-serial --run-cuda
+```
 
 ## Throughput
 
-A typical benchmark output comparing serial Numba code to 20 Intel Icelake threads to SXM Nvidia H100 GPU would be:
+A typical benchmark output comparing serial Numba code to 20 Intel Ice Lake threads to SXM Nvidia H100 GPU would be:
 
 ```sh
 Generating 128 random voter rankings with 8,192 candidates

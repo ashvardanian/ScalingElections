@@ -1,0 +1,18 @@
+[project]
+name = "scaling-democracy"
+version = "0.2.0"
+description = "GPU-accelerated Schulze voting algorithm"
+readme = "README.md"
+requires-python = ">=3.7"
+authors = [
+    { name = "Ash Vardanian", email = "1983160+ashvardanian@users.noreply.github.com" },
+]
+urls = { Homepage = "https://github.com/ashvardanian/scaling-democracy" }
+dependencies = ["numpy"]
+
+[build-system]
+requires = ["setuptools>=65.5.1", "wheel", "pybind11", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project.optional-dependencies]
+dev = ["numba", "cupy-cuda12x", "pycuda", "pytest"]
