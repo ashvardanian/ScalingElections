@@ -38,18 +38,25 @@ uv run benchmark.py \
     --run-openmp --run-numba --run-serial --run-cuda
 ```
 
+## Links
+
+- [Blogpost](https://ashvardanian.com/posts/scaling-democracy/)
+- [Schulze voting method description](https://en.wikipedia.org/wiki/Schulze_method)
+- [On traversal order for Floyd Warshall algorithm](https://moorejs.github.io/APSP-in-parallel/)
+- [CUDA + Python project template](https://github.com/ashvardanian/cuda-python-starter-kit)
+
 ## Throughput
 
 A typical benchmark output comparing serial Numba code to 16 Intel Ice Lake cores to SXM Nvidia H100 GPU would be:
 
 ```sh
-Generating 4,096 random voter rankings with 4,096 candidates
-Generated voter rankings, proceeding with 16 threads
-Numba: 11.2169 secs, 6,126,425,774.83 cells^3/sec
-CUDA: 0.3146 secs, 218,437,101,103.83 cells^3/sec
-CUDA with TMA: 0.2969 secs, 231,448,250,952.52 cells^3/sec
-OpenMP: 24.7729 secs, 2,773,975,923.94 cells^3/sec
-Serial: 58.8089 secs, 1,168,522,106.72 cells^3/sec
+> Generating 4,096 random voter rankings with 4,096 candidates
+> Generated voter rankings, proceeding with 16 threads
+> Numba: 11.2169 secs, 6,126,425,774.83 cells^3/sec
+> CUDA: 0.3146 secs, 218,437,101,103.83 cells^3/sec
+> CUDA with TMA: 0.2969 secs, 231,448,250,952.52 cells^3/sec
+> OpenMP: 24.7729 secs, 2,773,975,923.94 cells^3/sec
+> Serial: 58.8089 secs, 1,168,522,106.72 cells^3/sec
 ```
 
 CUDA outperforms the baseline JIT-compiled parallel kernel by a factor of __37.78x__.
@@ -72,9 +79,75 @@ Repeating the experiment with 192-core AWS Graviton 4 chips, the timings with ti
 
 Comparing the numbers, we are still looking at a roughly 4x speedup of CUDA for the largest matrix size tested for a comparable power consumption and hardware rental cost.
 
-## Links
+---
 
-- [Blogpost](https://ashvardanian.com/posts/scaling-democracy/)
-- [Schulze voting method description](https://en.wikipedia.org/wiki/Schulze_method)
-- [On traversal order for Floyd Warshall algorithm](https://moorejs.github.io/APSP-in-parallel/)
-- [CUDA + Python project template](https://github.com/ashvardanian/cuda-python-starter-kit)
+With NVIDIA Nsight Compute CLI we can dissect the kernels and see that there is more room for improvement:
+
+```sh
+ncu uv run benchmark.py --num-candidates 4096 --num-voters 4096 --tile-size 32 --run-cuda
+>  void _cuda_independent<32>(unsigned int, unsigned int, unsigned int *) (128, 128, 1)x(32, 32, 1), Context 1, Stream 7, Device 0, CC 9.0
+>    Section: GPU Speed Of Light Throughput
+>    ----------------------- ----------- ------------
+>    Metric Name             Metric Unit Metric Value
+>    ----------------------- ----------- ------------
+>    DRAM Frequency                  Ghz         3.20
+>    SM Frequency                    Ghz         1.50
+>    Elapsed Cycles                cycle       307595
+>    Memory Throughput                 %        78.65
+>    DRAM Throughput                   %        10.69
+>    Duration                         us       205.22
+>    L1/TEX Cache Throughput           %        79.90
+>    L2 Cache Throughput               %        15.54
+>    SM Active Cycles              cycle    302305.17
+>    Compute (SM) Throughput           %        66.51
+>    ----------------------- ----------- ------------
+>
+>    OPT   Memory is more heavily utilized than Compute: Look at the Memory Workload Analysis section to identify the L1 
+>          bottleneck. Check memory replay (coalescing) metrics to make sure you're efficiently utilizing the bytes      
+>          transferred. Also consider whether it is possible to do more work per memory access (kernel fusion) or        
+>          whether there are values you can (re)compute.                                                                 
+>
+>    Section: Launch Statistics
+>    -------------------------------- --------------- ---------------
+>    Metric Name                          Metric Unit    Metric Value
+>    -------------------------------- --------------- ---------------
+>    Block Size                                                  1024
+>    Cluster Scheduling Policy                           PolicySpread
+>    Cluster Size                                                   0
+>    Function Cache Configuration                     CachePreferNone
+>    Grid Size                                                  16384
+>    Registers Per Thread             register/thread              31
+>    Shared Memory Configuration Size           Kbyte           32.77
+>    Driver Shared Memory Per Block       Kbyte/block            1.02
+>    Dynamic Shared Memory Per Block       byte/block               0
+>    Static Shared Memory Per Block       Kbyte/block           12.29
+>    # SMs                                         SM             132
+>    Stack Size                                                  1024
+>    Threads                                   thread        16777216
+>    # TPCs                                                        66
+>    Enabled TPC IDs                                              all
+>    Uses Green Context                                             0
+>    Waves Per SM                                               62.06
+>    -------------------------------- --------------- ---------------
+>
+>    Section: Occupancy
+>    ------------------------------- ----------- ------------
+>    Metric Name                     Metric Unit Metric Value
+>    ------------------------------- ----------- ------------
+>    Max Active Clusters                 cluster            0
+>    Max Cluster Size                      block            8
+>    Overall GPU Occupancy                     %            0
+>    Cluster Occupancy                         %            0
+>    Block Limit Barriers                  block           32
+>    Block Limit SM                        block           32
+>    Block Limit Registers                 block            2
+>    Block Limit Shared Mem                block            2
+>    Block Limit Warps                     block            2
+>    Theoretical Active Warps per SM        warp           64
+>    Theoretical Occupancy                     %          100
+>    Achieved Occupancy                        %        92.97
+>    Achieved Active Warps Per SM           warp        59.50
+>    ------------------------------- ----------- ------------
+```
+
+So feel free to fork and suggest improvements 🤗
