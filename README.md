@@ -30,29 +30,32 @@ pip install -e .         # Build locally and install dependencies
 python benchmark.py      # Run the default problem size
 ```
 
-Or with custom parameters:
+Or with custom parameters for the shape and the backends:
 
 ```sh
 uv run benchmark.py \
---num-candidates 1024 \
---num-voters 1024 \
---tile-size 16 \
---run-openmp --run-numba --run-serial --run-cuda
+    --num-candidates 4096 --num-voters 4096 --tile-size 32 \
+    --run-openmp --run-numba --run-serial --run-cuda
 ```
 
 ## Throughput
 
-A typical benchmark output comparing serial Numba code to 20 Intel Ice Lake threads to SXM Nvidia H100 GPU would be:
+A typical benchmark output comparing serial Numba code to 16 Intel Ice Lake cores to SXM Nvidia H100 GPU would be:
 
 ```sh
-Generating 128 random voter rankings with 8,192 candidates
-Generated voter rankings, proceeding with 20 threads
-Serial: 454.5124 seconds, 1,209,550,826.73 candidates^3/sec
-Parallel: 68.4111 seconds, 8,036,063,293.27 candidates^3/sec
-CUDA: 1.9802 seconds, 277,620,752,084.85 candidates^3/sec
+Generating 4,096 random voter rankings with 4,096 candidates
+Generated voter rankings, proceeding with 16 threads
+Numba: 11.2169 secs, 6,126,425,774.83 cells^3/sec
+CUDA: 0.3146 secs, 218,437,101,103.83 cells^3/sec
+CUDA with TMA: 0.2969 secs, 231,448,250,952.52 cells^3/sec
+OpenMP: 24.7729 secs, 2,773,975,923.94 cells^3/sec
+Serial: 58.8089 secs, 1,168,522,106.72 cells^3/sec
 ```
 
-CUDA outperforms the baseline JIT-compiled parallel kernel by a factor of __34.55x__.
+CUDA outperforms the baseline JIT-compiled parallel kernel by a factor of __37.78x__.
+
+---
+
 40 core CPU uses ~270 Watts, so 10 cores use ~67.5 Watts.
 Our SXM Nvidia H100 has a ~700 Watt TDP, but consumes only 360 under such load, so 5x more power-hungry, meaning the CUDA implementation is up to 7x more power-efficient than Numba on that Intel CPU.
 As the matrix grows, the GPU utilization improves and the experimentally observed throughput fits a sub-cubic curve.
