@@ -283,6 +283,27 @@ def get_winner_and_ranking(
     return winner, ranked_candidates
 
 
+def format_time(elapsed_sec: float) -> str:
+    """Format time with appropriate unit (ms or s)."""
+    elapsed_ms = elapsed_sec * 1000
+    if elapsed_ms < 1000:
+        return f"{int(elapsed_ms)} ms"
+    else:
+        return f"{elapsed_sec:.2f} s"
+
+
+def format_throughput(cells_per_sec: float) -> str:
+    """Format throughput with appropriate unit (T/G/M cells³/s)."""
+    if cells_per_sec >= 1e12:
+        return f"{cells_per_sec / 1e12:.1f} Tcells³/s"
+    elif cells_per_sec >= 1e9:
+        return f"{cells_per_sec / 1e9:.1f} Gcells³/s"
+    elif cells_per_sec >= 1e6:
+        return f"{cells_per_sec / 1e6:.1f} Mcells³/s"
+    else:
+        return f"{cells_per_sec / 1e3:.1f} Kcells³/s"
+
+
 # Benchmark and comparison code remains the same
 if __name__ == "__main__":
     import time
@@ -339,12 +360,6 @@ if __name__ == "__main__":
         allow_tma=False,
         tile_size=tile_size,
     )
-    compute_strongest_paths_h100 = lambda x: compute_strongest_paths(
-        x,
-        allow_gpu=True,
-        allow_tma=False,
-        tile_size=tile_size,
-    )
     compute_strongest_paths_openmp = lambda x: compute_strongest_paths(
         x,
         allow_gpu=False,
@@ -358,16 +373,27 @@ if __name__ == "__main__":
         )
     )
 
-    # Generate random voter rankings
+    # Print header
+    print("=== Schulze Voting Algorithm (Python) ===")
+    print()
+
+    # Print GPU info if available
     try:
         log_gpus()
     except Exception as e:
-        print(f"✘ Error: Could not log GPUs: {e}")
-    print(
-        f"Generating {num_voters:,} random voter rankings with {num_candidates:,} candidates"
-    )
+        print(f"✗ Could not detect GPU: {e}")
 
-    # To simplify the benchmark, let's generate a simple square matrix
+    # Print configuration
+    print("Configuration:")
+    voters_str = f"{num_voters:,}" if num_voters > 0 else "random"
+    print(f"  Problem size: {num_candidates:,} candidates × {voters_str} voters")
+    if tile_size > 0:
+        print(f"  Tile size: {tile_size} × {tile_size}")
+    print(f"  CPU threads: {get_num_threads()}")
+    print()
+
+    # Generate random voter rankings
+    print("Generating preferences...")
     if num_voters == 0:
         preferences = np.random.randint(
             0, num_candidates, (num_candidates, num_candidates)
@@ -377,49 +403,63 @@ if __name__ == "__main__":
             np.random.permutation(num_candidates) for _ in range(num_voters)
         ]
         preferences = build_pairwise_preferences(voter_rankings)
-    print(f"Generated voter rankings, proceeding with {get_num_threads()} threads")
 
-    # To avoid cold-start and aggregating JIT costs, let's run all functions on tiny inputs first
+    # Warm-up: run all functions on tiny inputs first to avoid JIT costs
     sub_preferences = preferences[: num_candidates // 8, : num_candidates // 8]
     sub_preferences_baseline = compute_strongest_paths_numba_serial(sub_preferences)
 
+    # Benchmarking section
+    print()
+    print("─── Benchmarking ───────────────────────────────────")
+    print()
+
     for name, wanted, callback in [
-        ("Numba", args.run_numba, compute_strongest_paths_numba_tiled),
-        ("CUDA", args.run_cuda, compute_strongest_paths_cuda),
-        ("CUDA with TMA", args.run_cuda, compute_strongest_paths_h100),
+        ("Tiled CPU", args.run_numba, compute_strongest_paths_numba_tiled),
+        ("Tiled GPU", args.run_cuda, compute_strongest_paths_cuda),
         ("OpenMP", args.run_openmp, compute_strongest_paths_openmp),
         ("Serial", args.run_serial, compute_strongest_paths_numba_serial),
     ]:
         if not wanted:
-            print(f"↷ Skipping {name}")
             continue
 
-        print(f"→ Starting warm-up: {name}")
+        print(f"→ {name}")
+
+        # Warm-up run
         try:
             start_time = time.time()
             sub_preferences_result = callback(sub_preferences)
             elapsed_time = time.time() - start_time
+            print(f"  Warm-up: {format_time(elapsed_time)}")
         except Exception as e:
-            print(f"✘ Error: {name} raised an exception: {e}")
+            print(f"  ✗ Warm-up failed: {e}")
             continue
 
-        print(f"- {name} took: {elapsed_time:.4f} secs")
+        # Verify correctness
         if not np.array_equal(sub_preferences_result, sub_preferences_baseline):
-            print(f"✘ Error: {name} returned different results from Numba baseline")
-        else:
-            print(f"✔ {name} returned correct results")
+            print(f"  ✗ Results don't match baseline!")
+            continue
 
-        # Run the benchmark
-        start_time = time.time()
-        callback(preferences)
-        elapsed_time = time.time() - start_time
-        throughput = num_candidates**3 / elapsed_time
-        print(f"{name}: {elapsed_time:.4f} secs, {throughput:,.2f} cells^3/sec")
+        # Main benchmark run
+        try:
+            start_time = time.time()
+            callback(preferences)
+            elapsed_time = time.time() - start_time
+            throughput = num_candidates**3 / elapsed_time
+            print(f"  Run:     {format_time(elapsed_time)} │ {format_throughput(throughput)}")
+        except Exception as e:
+            print(f"  ✗ Benchmark failed: {e}")
+            continue
 
-    # Determine the winner and ranking for the final method (they should be the same for all methods)
+        print()
+
+    # Determine the winner and ranking
     candidates = list(range(sub_preferences.shape[0]))
-    winner, ranking = get_winner_and_ranking(candidates, sub_preferences)
+    winner, ranking = get_winner_and_ranking(candidates, sub_preferences_baseline)
 
-    # Print the results
-    print(f"    Winner is {winner}")
-    print(f"    Ranked {len(ranking)} candidates")
+    # Print election results
+    print("─── Election Results ───────────────────────────────")
+    print()
+    print(f"  Winner: Candidate #{winner}")
+    if len(ranking) >= 5:
+        print(f"  Top 5:  #{ranking[0]}, #{ranking[1]}, #{ranking[2]}, #{ranking[3]}, #{ranking[4]}")
+    print()

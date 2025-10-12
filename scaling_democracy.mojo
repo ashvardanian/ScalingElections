@@ -149,7 +149,7 @@ fn build_pairwise_preferences(voter_rankings: List[List[Int]]) -> PreferenceMatr
 
     return preferences^
 
-fn compute_strongest_paths_serial(preferences: PreferenceMatrix) -> StrongestPathsMatrix:
+fn compute_strongest_paths_serial(preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
     """
     Serial implementation of Schulze strongest paths computation.
 
@@ -272,7 +272,7 @@ fn copy_buffer_to_tile(
             if row < num_candidates and col < num_candidates:
                 dest[row * num_candidates + col] = source[i * tile_size + j]
 
-fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> StrongestPathsMatrix:
+fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
     """
     Tiled CPU implementation of Schulze strongest paths computation.
     Uses blocking for better cache utilization.
@@ -510,56 +510,69 @@ fn generate_random_preferences(num_candidates: Int, num_voters: Int) -> Preferen
 
 fn benchmark_implementation(
     name: String,
-    implementation: fn(PreferenceMatrix) -> StrongestPathsMatrix,
-    preferences: PreferenceMatrix
-) -> StrongestPathsMatrix:
+    implementation: fn(PreferenceMatrix) raises -> StrongestPathsMatrix,
+    preferences: PreferenceMatrix,
+    warmup: Bool = False
+) raises -> StrongestPathsMatrix:
     """
-    Benchmark a specific implementation.
+    Benchmark a specific implementation with optional warm-up.
 
     Args:
         name: Name of the implementation.
         implementation: Function to benchmark.
         preferences: Input preferences matrix.
+        warmup: If True, print as warm-up run; otherwise as benchmark.
 
     Returns:
         Result of the computation.
     """
-    print("Computing strongest paths (" + name + ")...")
     var start_time = perf_counter_ns()
     var result = implementation(preferences)
     var end_time = perf_counter_ns()
     var elapsed_ns = end_time - start_time
-    var elapsed_ms = elapsed_ns // 1_000_000  # Convert to milliseconds
 
-    print(name + " took: " + String(elapsed_ms) + " ms")
-    print_throughput_stats(elapsed_ns, preferences.num_candidates)
+    if warmup:
+        print("  Warm-up: " + format_time(elapsed_ns))
+    else:
+        print("  Run:     " + format_time(elapsed_ns) + " │ " + format_throughput_from_ns(elapsed_ns, preferences.num_candidates))
     return result^
 
-fn print_throughput_stats(elapsed_ns: Int, num_candidates: Int):
-    """Prints derived throughput metrics for a completed run."""
-    if elapsed_ns <= 0:
-        return
+fn format_time(elapsed_ns: Int) -> String:
+    """Format time with appropriate unit (ms or s)."""
+    var elapsed_ms = elapsed_ns // 1_000_000
+    if elapsed_ms < 1000:
+        return String(elapsed_ms) + " ms"
+    else:
+        var elapsed_sec = Float64(elapsed_ns) / 1_000_000_000.0
+        var sec_x100 = Int(elapsed_sec * 100.0)
+        return String(sec_x100 // 100) + "." + String((sec_x100 % 100) // 10) + String(sec_x100 % 10) + " s"
 
+fn format_throughput(cells_per_sec: Float64) -> String:
+    """Format throughput with appropriate unit (T/G/M cells³/s)."""
+    if cells_per_sec >= 1e12:
+        var t_x10 = Int(cells_per_sec / 1e11)
+        return String(t_x10 // 10) + "." + String(t_x10 % 10) + " Tcells³/s"
+    elif cells_per_sec >= 1e9:
+        var g_x10 = Int(cells_per_sec / 1e8)
+        return String(g_x10 // 10) + "." + String(g_x10 % 10) + " Gcells³/s"
+    elif cells_per_sec >= 1e6:
+        var m_x10 = Int(cells_per_sec / 1e5)
+        return String(m_x10 // 10) + "." + String(m_x10 % 10) + " Mcells³/s"
+    else:
+        var k_x10 = Int(cells_per_sec / 1e2)
+        return String(k_x10 // 10) + "." + String(k_x10 % 10) + " Kcells³/s"
+
+fn format_throughput_from_ns(elapsed_ns: Int, num_candidates: Int) -> String:
+    """Calculate and format throughput from timing."""
+    if elapsed_ns <= 0:
+        return "N/A"
     var elapsed_sec = Float64(elapsed_ns) / 1_000_000_000.0
     if elapsed_sec <= 0.0:
-        return
-
+        return "N/A"
     var candidates_f = Float64(num_candidates)
     var total_cells = candidates_f * candidates_f * candidates_f
     var cells_per_sec = total_cells / elapsed_sec
-    var cells_per_sec_int = Int(cells_per_sec)
-    var mcells_per_sec_int = Int(cells_per_sec / 1_000_000.0)
-    var gcells_per_sec_int = Int(cells_per_sec / 1_000_000_000.0)
-
-    print(
-        "  → Throughput: "
-        + String(cells_per_sec_int)
-        + " cells^3/s ("
-        + String(mcells_per_sec_int)
-        + " Mcells/s, "
-        + String(gcells_per_sec_int)
-        + " Gcells/s)"
-    )
+    return format_throughput(cells_per_sec)
 
 fn detect_gpu() -> Bool:
     """
@@ -909,6 +922,10 @@ fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatri
 
     return result^
 
+fn compute_strongest_paths_gpu_wrapper(preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    """Non-parametric wrapper for compute_strongest_paths_gpu with tile_size=32."""
+    return compute_strongest_paths_gpu[32](preferences)
+
 fn parse_int_arg[origin: Origin](args: VariadicList[StringSlice[origin]], flag: String, default: Int) -> Int:
     """Parse an integer command-line argument."""
     for i in range(len(args)):
@@ -939,7 +956,6 @@ fn print_usage():
     print("  --tiled-only          Run only tiled CPU implementation")
     print("  --run-gpu             Run GPU implementation (requires CUDA)")
     print("  --gpu-tile-size N     GPU tile size (default: 32, must be 4, 8, 16, or 32)")
-    print("  --disable-tma         Disable Tensor Memory Access on Hopper GPUs")
     print("  --help, -h            Show this help message")
     print()
     print("Examples:")
@@ -967,26 +983,20 @@ fn main():
     var serial_only = has_flag(args, "--serial-only")
     var tiled_only = has_flag(args, "--tiled-only")
     var run_gpu = has_flag(args, "--run-gpu")
-    var disable_tma = has_flag(args, "--disable-tma")
 
     # Detect GPU availability
-    print("=== Mojo Schulze Voting Algorithm ===")
+    print("=== Schulze Voting Algorithm (Mojo) ===")
     print()
 
     if run_gpu:
-        print("Detecting GPU...")
         var gpu_available = detect_gpu()
-        if gpu_available:
-            print("✓ CUDA GPU detected and available")
-        else:
-            print("✗ No CUDA GPU detected - GPU mode disabled")
+        if not gpu_available:
+            print("✗ No GPU detected - GPU mode disabled")
             run_gpu = False
-    print()
 
     # Validate tile size
     if tile_size_arg != TILE_SIZE:
-        print("Warning: --tile-size argument (" + String(tile_size_arg) + ") must match compiled TILE_SIZE (" + String(TILE_SIZE) + ")")
-        print("         Ignoring --tile-size argument and using TILE_SIZE=" + String(TILE_SIZE))
+        print("Warning: --tile-size must match compiled TILE_SIZE (" + String(TILE_SIZE) + ")")
         print()
 
     # Validate GPU tile size
@@ -1001,63 +1011,52 @@ fn main():
         return
 
     print("Configuration:")
-    print("  Candidates:", num_candidates)
-    print("  Voters:", num_voters)
-    print("  CPU Tile Size:", TILE_SIZE)
+    print("  Problem size: " + String(num_candidates) + " candidates × " + String(num_voters) + " voters")
+    print("  CPU tile: " + String(TILE_SIZE) + " × " + String(TILE_SIZE))
     if run_gpu:
-        print("  GPU Tile Size:", gpu_tile_size)
-        print("  TMA Enabled:", "No" if disable_tma else "Yes")
+        print("  GPU tile: " + String(gpu_tile_size) + " × " + String(gpu_tile_size))
     print()
 
-    print("Generating random voter preferences...")
+    print("Generating preferences...")
     var preferences = generate_random_preferences(num_candidates, num_voters)
 
     var run_both = not serial_only and not tiled_only and not run_gpu
 
     # Test different implementations based on flags
     if run_gpu:
-        # Run GPU implementation
-        print("Testing GPU implementation...")
+        # Run GPU implementation with warm-up
+        print()
+        print("─── Benchmarking ───────────────────────────────────")
+        print()
+
         try:
-            print("Computing strongest paths (GPU - Mojo)...")
-            var start_time = perf_counter_ns()
-            var strongest_paths_gpu = compute_strongest_paths_gpu(preferences)
-            var end_time = perf_counter_ns()
-            var elapsed_ns = end_time - start_time
-            var elapsed_ms = elapsed_ns // 1_000_000
-            print("GPU (Mojo) took: " + String(elapsed_ms) + " ms")
-            print_throughput_stats(elapsed_ns, num_candidates)
+            print("→ Tiled GPU")
+            # Warm-up run
+            _ = benchmark_implementation("Tiled GPU", compute_strongest_paths_gpu_wrapper, preferences, warmup=True)
+
+            # Actual benchmark
+            var strongest_paths_gpu = benchmark_implementation("Tiled GPU", compute_strongest_paths_gpu_wrapper, preferences)
 
             # Optionally compare with CPU
             if not serial_only and not tiled_only:
-                print("Testing tiled CPU implementation for comparison...")
+                print()
+                print("→ Tiled CPU")
                 var strongest_paths_tiled = benchmark_implementation("Tiled CPU", compute_strongest_paths_tiled_cpu, preferences)
 
                 # Verify GPU and CPU results match
                 var results_match = True
-                var first_mismatch_i = -1
-                var first_mismatch_j = -1
                 for i in range(num_candidates):
                     for j in range(num_candidates):
                         if strongest_paths_gpu[i, j] != strongest_paths_tiled[i, j]:
-                            if first_mismatch_i == -1:
-                                first_mismatch_i = i
-                                first_mismatch_j = j
                             results_match = False
                             break
                     if not results_match:
                         break
 
                 if results_match:
-                    print("✓ GPU and CPU results match!")
+                    print("  ✓ Results validated")
                 else:
-                    print("✗ GPU and CPU results don't match!")
-                    print("First mismatch at [" + String(first_mismatch_i) + ", " + String(first_mismatch_j) + "]:")
-                    print("  GPU value:", strongest_paths_gpu[first_mismatch_i, first_mismatch_j])
-                    print("  CPU value:", strongest_paths_tiled[first_mismatch_i, first_mismatch_j])
-                    print("Sample values at [0, 1]:")
-                    print("  GPU:", strongest_paths_gpu[0, 1])
-                    print("  CPU:", strongest_paths_tiled[0, 1])
+                    print("  ✗ Results don't match!")
 
             # Get winner and ranking using GPU result
             var candidates = List[Int]()
@@ -1069,130 +1068,110 @@ fn main():
             var ranking = result_tuple[1].copy()
 
             print()
-            print("=== Results ===")
-            print("Winner: Candidate", winner)
+            print("─── Election Results ───────────────────────────────")
+            print()
+            print("  Winner: Candidate #" + String(winner))
             if num_candidates >= 5:
-                print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
-            else:
-                var ranking_str = "["
-                for i in range(len(ranking)):
-                    if i > 0:
-                        ranking_str += ", "
-                    ranking_str += String(ranking[i])
-                ranking_str += "]"
-                print("Ranking:", ranking_str)
+                print("  Top 5:  #" + String(ranking[0]) + ", #" + String(ranking[1]) + ", #" + String(ranking[2]) + ", #" + String(ranking[3]) + ", #" + String(ranking[4]))
         except e:
-            print("✗ GPU execution failed:", e)
+            print("  ✗ GPU execution failed: " + String(e))
     elif run_both:
         # Run both CPU implementations and compare
-        print("Testing serial implementation...")
-        var strongest_paths_serial = benchmark_implementation("Serial", compute_strongest_paths_serial, preferences)
-
-        print("Testing tiled CPU implementation...")
-        var strongest_paths_tiled = benchmark_implementation("Tiled CPU", compute_strongest_paths_tiled_cpu, preferences)
-
-        # Verify CPU results match
-        var cpu_results_match = True
-        for i in range(num_candidates):
-            for j in range(num_candidates):
-                if strongest_paths_serial[i, j] != strongest_paths_tiled[i, j]:
-                    cpu_results_match = False
-                    break
-            if not cpu_results_match:
-                break
-
-        if cpu_results_match:
-            print("✓ Serial and tiled CPU results match!")
-        else:
-            print("✗ CPU results don't match!")
-
-        # Get winner and ranking using tiled result
-        var candidates = List[Int]()
-        for i in range(num_candidates):
-            candidates.append(i)
-
-        var result_tuple = get_winner_and_ranking(candidates, strongest_paths_tiled)
-        var winner = result_tuple[0]
-        var ranking = result_tuple[1].copy()
-
         print()
-        print("=== Results ===")
-        print("Winner: Candidate", winner)
-        if num_candidates >= 5:
-            print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
-        else:
-            var ranking_str = "["
-            for i in range(len(ranking)):
-                if i > 0:
-                    ranking_str += ", "
-                ranking_str += String(ranking[i])
-            ranking_str += "]"
-            print("Ranking:", ranking_str)
+        print("─── Benchmarking ───────────────────────────────────")
+        print()
+
+        try:
+            print("→ Serial")
+            var strongest_paths_serial = benchmark_implementation("Serial", compute_strongest_paths_serial, preferences)
+
+            print()
+            print("→ Tiled CPU")
+            var strongest_paths_tiled = benchmark_implementation("Tiled CPU", compute_strongest_paths_tiled_cpu, preferences)
+
+            # Verify CPU results match
+            var cpu_results_match = True
+            for i in range(num_candidates):
+                for j in range(num_candidates):
+                    if strongest_paths_serial[i, j] != strongest_paths_tiled[i, j]:
+                        cpu_results_match = False
+                        break
+                if not cpu_results_match:
+                    break
+
+            if cpu_results_match:
+                print("  ✓ Results validated")
+            else:
+                print("  ✗ Results don't match!")
+
+            # Get winner and ranking using tiled result
+            var candidates = List[Int]()
+            for i in range(num_candidates):
+                candidates.append(i)
+
+            var result_tuple = get_winner_and_ranking(candidates, strongest_paths_tiled)
+            var winner = result_tuple[0]
+            var ranking = result_tuple[1].copy()
+
+            print()
+            print("─── Election Results ───────────────────────────────")
+            print()
+            print("  Winner: Candidate #" + String(winner))
+            if num_candidates >= 5:
+                print("  Top 5:  #" + String(ranking[0]) + ", #" + String(ranking[1]) + ", #" + String(ranking[2]) + ", #" + String(ranking[3]) + ", #" + String(ranking[4]))
+        except e:
+            print("  ✗ Execution failed: " + String(e))
     elif serial_only:
         # Run only serial
-        print("Testing serial implementation...")
-        var strongest_paths_serial = benchmark_implementation("Serial", compute_strongest_paths_serial, preferences)
-
-        var candidates = List[Int]()
-        for i in range(num_candidates):
-            candidates.append(i)
-
-        var result_tuple = get_winner_and_ranking(candidates, strongest_paths_serial)
-        var winner = result_tuple[0]
-        var ranking = result_tuple[1].copy()
-
         print()
-        print("=== Results ===")
-        print("Winner: Candidate", winner)
-        if num_candidates >= 5:
-            print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
-        else:
-            var ranking_str = "["
-            for i in range(len(ranking)):
-                if i > 0:
-                    ranking_str += ", "
-                ranking_str += String(ranking[i])
-            ranking_str += "]"
-            print("Ranking:", ranking_str)
+        print("─── Benchmarking ───────────────────────────────────")
+        print()
+
+        try:
+            print("→ Serial")
+            var strongest_paths_serial = benchmark_implementation("Serial", compute_strongest_paths_serial, preferences)
+
+            var candidates = List[Int]()
+            for i in range(num_candidates):
+                candidates.append(i)
+
+            var result_tuple = get_winner_and_ranking(candidates, strongest_paths_serial)
+            var winner = result_tuple[0]
+            var ranking = result_tuple[1].copy()
+
+            print()
+            print("─── Election Results ───────────────────────────────")
+            print()
+            print("  Winner: Candidate #" + String(winner))
+            if num_candidates >= 5:
+                print("  Top 5:  #" + String(ranking[0]) + ", #" + String(ranking[1]) + ", #" + String(ranking[2]) + ", #" + String(ranking[3]) + ", #" + String(ranking[4]))
+        except e:
+            print("  ✗ Execution failed: " + String(e))
     else:  # tiled_only
         # Run only tiled
-        print("Testing tiled CPU implementation...")
-        var strongest_paths_tiled = benchmark_implementation("Tiled CPU", compute_strongest_paths_tiled_cpu, preferences)
-
-        var candidates = List[Int]()
-        for i in range(num_candidates):
-            candidates.append(i)
-
-        var result_tuple = get_winner_and_ranking(candidates, strongest_paths_tiled)
-        var winner = result_tuple[0]
-        var ranking = result_tuple[1].copy()
-
         print()
-        print("=== Results ===")
-        print("Winner: Candidate", winner)
-        if num_candidates >= 5:
-            print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
-        else:
-            var ranking_str = "["
-            for i in range(len(ranking)):
-                if i > 0:
-                    ranking_str += ", "
-                ranking_str += String(ranking[i])
-            ranking_str += "]"
-            print("Ranking:", ranking_str)
+        print("─── Benchmarking ───────────────────────────────────")
+        print()
 
-    # Calculate some statistics
-    var total_votes: Int = 0
-    for i in range(num_candidates):
-        for j in range(num_candidates):
-            total_votes += Int(preferences[i, j])
+        try:
+            print("→ Tiled CPU")
+            var strongest_paths_tiled = benchmark_implementation("Tiled CPU", compute_strongest_paths_tiled_cpu, preferences)
 
-    print("Total pairwise votes:", total_votes)
-    print("Average votes per pair:", total_votes // (num_candidates * num_candidates))
+            var candidates = List[Int]()
+            for i in range(num_candidates):
+                candidates.append(i)
+
+            var result_tuple = get_winner_and_ranking(candidates, strongest_paths_tiled)
+            var winner = result_tuple[0]
+            var ranking = result_tuple[1].copy()
+
+            print()
+            print("─── Election Results ───────────────────────────────")
+            print()
+            print("  Winner: Candidate #" + String(winner))
+            if num_candidates >= 5:
+                print("  Top 5:  #" + String(ranking[0]) + ", #" + String(ranking[1]) + ", #" + String(ranking[2]) + ", #" + String(ranking[3]) + ", #" + String(ranking[4]))
+        except e:
+            print("  ✗ Execution failed: " + String(e))
 
     print()
-    print("✓ Mojo Schulze voting implementation complete!")
-    print("  - Serial implementation: Basic Floyd-Warshall algorithm")
-    print("  - Tiled CPU implementation: Blocked algorithm with parallelization")
-    if run_gpu:
-        print("  - GPU implementation: Pure Mojo GPU kernels")
