@@ -1,17 +1,10 @@
 """
-Mojo implementation of the Schulze voting algorithm with CPU parallelization.
+Mojo implementation of the Schulze voting algorithm with CPU and GPU acceleration.
 
 This implementation provides parallel computation of strongest paths for democratic voting,
 ported from the original Python/CUDA implementation in benchmark.py and scaling_democracy.cu.
 The Schulze method is a Condorcet voting system that selects the candidate who would win
 in head-to-head comparisons against all other candidates.
-
-## Features
-
-- **Serial Implementation**: Basic Floyd-Warshall algorithm for reference
-- **Tiled CPU Implementation**: Cache-optimized blocked algorithm with parallelization
-- **Performance**: 1-2ms for 128 candidates with 2000 voters on modern CPUs
-- **Memory Efficient**: Manual memory management using UnsafePointer
 
 ## Usage
 
@@ -19,46 +12,30 @@ Run directly with Mojo via Pixi:
 
 ```bash
 pixi run mojo scaling_democracy.mojo
+pixi run mojo scaling_democracy.mojo --num-candidates 4096 --num-voters 4096
 ```
 
 Or compile and run:
 
 ```bash
-pixi run mojo build scaling_democracy.mojo -o schulze
-./schulze
+pixi run mojo build scaling_democracy.mojo -o scaling_democracy
+./scaling_democracy
 ```
 
-## Implementation Details
-
-The tiled implementation uses a three-phase blocked Floyd-Warshall algorithm:
-1. **Diagonal Phase**: Process diagonal tiles first (dependencies)
-2. **Partially Dependent Phase**: Process row and column tiles
-3. **Independent Phase**: Process remaining tiles in parallel
-
-Tile size is set to 16 to optimize cache utilization. The algorithm uses
-`parallelize` for multi-threaded execution across CPU cores.
-
-## API Compatibility
-
-Updated for Mojo 0.25.6.1 API:
-- Uses `UnsafePointer` for manual memory management (Tensor API deprecated)
-- Conforms to `Movable` trait for move semantics
-- Uses modern parameter conventions: `out`, `mut`, `deinit`
-- Uses `perf_counter_ns()` for high-precision timing
-
-## Author
-
-Port to Mojo by Claude Code
-Original CUDA implementation by Ash Vardanian
 See: https://ashvardanian.com/posts/scaling-democracy/
 """
 
 from collections import List
-from memory import UnsafePointer, memset_zero
+from memory import UnsafePointer, memset_zero, stack_allocation, AddressSpace
 from algorithm import parallelize
 from random import random_si64
 from time import perf_counter_ns
-from sys import argv
+from sys import argv, has_accelerator
+from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
+from gpu.id import block_idx, thread_idx, block_dim, global_idx
+from gpu.sync import barrier
+from layout import Layout, LayoutTensor
+from buffer import NDBuffer
 
 # Type aliases for clarity
 alias VotesCount = UInt32
@@ -332,7 +309,7 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
         var k_size = k_end - k_start
 
         # Dependent phase: process diagonal tile
-        var diagonal_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
+        var diagonal_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
         memset_zero(diagonal_tile, TILE_SIZE * TILE_SIZE)
 
         copy_tile_to_buffer(
@@ -351,8 +328,6 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
             k_start, k_start, k_size, num_candidates
         )
 
-        diagonal_tile.free()
-
         # Partially dependent phases - row tiles
         @parameter
         fn process_row_tiles(i: Int):
@@ -363,8 +338,8 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
             var i_end = min(i_start + TILE_SIZE, num_candidates)
             var i_size = i_end - i_start
 
-            var c_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
-            var b_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
+            var c_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
+            var b_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
             memset_zero(c_tile, TILE_SIZE * TILE_SIZE)
             memset_zero(b_tile, TILE_SIZE * TILE_SIZE)
 
@@ -379,9 +354,6 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
 
             copy_buffer_to_tile(c_tile, strongest_paths.data, i_start, k_start, i_size, num_candidates)
 
-            c_tile.free()
-            b_tile.free()
-
         parallelize[process_row_tiles](tiles_count)
 
         # Partially dependent phases - column tiles
@@ -394,8 +366,8 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
             var j_end = min(j_start + TILE_SIZE, num_candidates)
             var j_size = j_end - j_start
 
-            var c_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
-            var a_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
+            var c_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
+            var a_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
             memset_zero(c_tile, TILE_SIZE * TILE_SIZE)
             memset_zero(a_tile, TILE_SIZE * TILE_SIZE)
 
@@ -409,9 +381,6 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
             )
 
             copy_buffer_to_tile(c_tile, strongest_paths.data, k_start, j_start, j_size, num_candidates)
-
-            c_tile.free()
-            a_tile.free()
 
         parallelize[process_col_tiles](tiles_count)
 
@@ -432,9 +401,9 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
             var j_end = min(j_start + TILE_SIZE, num_candidates)
             var j_size = j_end - j_start
 
-            var c_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
-            var a_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
-            var b_tile = UnsafePointer[UInt32].alloc(TILE_SIZE * TILE_SIZE)
+            var c_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
+            var a_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
+            var b_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
             memset_zero(c_tile, TILE_SIZE * TILE_SIZE)
             memset_zero(a_tile, TILE_SIZE * TILE_SIZE)
             memset_zero(b_tile, TILE_SIZE * TILE_SIZE)
@@ -450,10 +419,6 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) -> Strongest
             )
 
             copy_buffer_to_tile(c_tile, strongest_paths.data, i_start, j_start, min(i_size, j_size), num_candidates)
-
-            c_tile.free()
-            a_tile.free()
-            b_tile.free()
 
         parallelize[process_independent_tiles](tiles_count * tiles_count)
 
