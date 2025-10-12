@@ -96,7 +96,7 @@ using barrier_t = cuda::barrier<cuda::thread_scope_block>;
  * @param b_col Column index of the second input tile in the global matrix.
  */
 template <std::uint32_t tile_size, bool synchronize = true, bool may_be_diagonal = true>
-__forceinline__ __device__ void _process_tile_cuda( //
+__forceinline__ __device__ void process_tile_cuda_( //
     votes_count_tile<tile_size>& c,                 //
     votes_count_tile<tile_size> const& a,           //
     votes_count_tile<tile_size> const& b,           //
@@ -147,7 +147,7 @@ __forceinline__ __device__ void _process_tile_cuda( //
  * @param b_col Column index of the second input tile in the global matrix.
  */
 template <std::uint32_t tile_size, bool synchronize = true, bool may_be_diagonal = true>
-__forceinline__ __device__ void _process_tile_cuda( //
+__forceinline__ __device__ void process_tile_cuda_( //
     votes_count_tile<tile_size>& c,                 //
     votes_count_tile<tile_size> const& a,           //
     votes_count_tile<tile_size> const& b,           //
@@ -187,7 +187,7 @@ __forceinline__ __device__ void _process_tile_cuda( //
  * @param graph The graph of strongest paths.
  */
 template <std::uint32_t tile_size>
-__global__ void _cuda_diagonal(candidate_idx_t n, candidate_idx_t k, votes_count_t* graph) {
+__global__ void cuda_diagonal_(candidate_idx_t n, candidate_idx_t k, votes_count_t* graph) {
     candidate_idx_t const bi = threadIdx.y;
     candidate_idx_t const bj = threadIdx.x;
 
@@ -195,7 +195,7 @@ __global__ void _cuda_diagonal(candidate_idx_t n, candidate_idx_t k, votes_count
     c[bi][bj] = graph[k * tile_size * n + k * tile_size + bi * n + bj];
 
     __syncthreads();
-    _process_tile_cuda<tile_size>(    //
+    process_tile_cuda_<tile_size>(    //
         c, c, c, bi, bj,              //
         tile_size * k, tile_size * k, //
         tile_size * k, tile_size * k, //
@@ -214,7 +214,7 @@ __global__ void _cuda_diagonal(candidate_idx_t n, candidate_idx_t k, votes_count
  * @param graph The graph of strongest paths.
  */
 template <std::uint32_t tile_size>
-__global__ void _cuda_partially_independent(candidate_idx_t n, candidate_idx_t k, votes_count_t* graph) {
+__global__ void cuda_partially_independent_(candidate_idx_t n, candidate_idx_t k, votes_count_t* graph) {
     candidate_idx_t const i = blockIdx.x;
     candidate_idx_t const bi = threadIdx.y;
     candidate_idx_t const bj = threadIdx.x;
@@ -232,7 +232,7 @@ __global__ void _cuda_partially_independent(candidate_idx_t n, candidate_idx_t k
     b[bi][bj] = graph[k * tile_size * n + k * tile_size + bi * n + bj];
 
     __syncthreads();
-    _process_tile_cuda<tile_size>(    //
+    process_tile_cuda_<tile_size>(    //
         c, c, b, bi, bj,              //
         i * tile_size, k * tile_size, //
         i * tile_size, k * tile_size, //
@@ -246,7 +246,7 @@ __global__ void _cuda_partially_independent(candidate_idx_t n, candidate_idx_t k
     a[bi][bj] = graph[k * tile_size * n + k * tile_size + bi * n + bj];
 
     __syncthreads();
-    _process_tile_cuda<tile_size>(    //
+    process_tile_cuda_<tile_size>(    //
         c, a, c, bi, bj,              //
         k * tile_size, i * tile_size, //
         k * tile_size, k * tile_size, //
@@ -265,7 +265,7 @@ __global__ void _cuda_partially_independent(candidate_idx_t n, candidate_idx_t k
  * @param graph The graph of strongest paths.
  */
 template <std::uint32_t tile_size>
-__global__ void _cuda_independent(candidate_idx_t n, candidate_idx_t k, votes_count_t* graph) {
+__global__ void cuda_independent_(candidate_idx_t n, candidate_idx_t k, votes_count_t* graph) {
     candidate_idx_t const j = blockIdx.x;
     candidate_idx_t const i = blockIdx.y;
     candidate_idx_t const bi = threadIdx.y;
@@ -286,7 +286,7 @@ __global__ void _cuda_independent(candidate_idx_t n, candidate_idx_t k, votes_co
     if (i == j)
         // We don't need to "synchronize", because A, C, and B tile arguments
         // are different in the independent state and will address different shared buffers.
-        _process_tile_cuda<tile_size, false, true>( //
+        process_tile_cuda_<tile_size, false, true>( //
             c, a, b, bi, bj,                        //
             i * tile_size, j * tile_size,           //
             i * tile_size, k * tile_size,           //
@@ -297,7 +297,7 @@ __global__ void _cuda_independent(candidate_idx_t n, candidate_idx_t k, votes_co
         // are different in the independent state and will address different shared buffers.
         // We also mark as "non diagonal", because the `i != j`, and in that case
         // we can avoid some branches.
-        _process_tile_cuda<tile_size, false, false>( //
+        process_tile_cuda_<tile_size, false, false>( //
             c, a, b, bi, bj,                         //
             i * tile_size, j * tile_size,            //
             i * tile_size, k * tile_size,            //
@@ -316,7 +316,7 @@ __global__ void _cuda_independent(candidate_idx_t n, candidate_idx_t k, votes_co
  * @param graph The graph of strongest paths represented as a `CUtensorMap`.
  */
 template <std::uint32_t tile_size>
-__global__ void _cuda_independent_hopper(candidate_idx_t n, candidate_idx_t k,
+__global__ void cuda_independent_hopper_(candidate_idx_t n, candidate_idx_t k,
                                          __grid_constant__ CUtensorMap const graph) {
     candidate_idx_t const j = blockIdx.x;
     candidate_idx_t const i = blockIdx.y;
@@ -369,7 +369,7 @@ __global__ void _cuda_independent_hopper(candidate_idx_t n, candidate_idx_t k,
     if (i == j)
         // We don't need to "synchronize", because A, C, and B tile arguments
         // are different in the independent state and will address different shared buffers.
-        _process_tile_cuda<tile_size, false, true>( //
+        process_tile_cuda_<tile_size, false, true>( //
             c, a, b, bi, bj,                        //
             i * tile_size, j * tile_size,           //
             i * tile_size, k * tile_size,           //
@@ -380,7 +380,7 @@ __global__ void _cuda_independent_hopper(candidate_idx_t n, candidate_idx_t k,
         // are different in the independent state and will address different shared buffers.
         // We also mark as "non diagonal", because the `i != j`, and in that case
         // we can avoid some branches.
-        _process_tile_cuda<tile_size, false, false>( //
+        process_tile_cuda_<tile_size, false, false>( //
             c, a, b, bi, bj,                         //
             i * tile_size, j * tile_size,            //
             i * tile_size, k * tile_size,            //
@@ -512,13 +512,13 @@ void compute_strongest_paths_cuda( //
     dim3 tile_shape(tile_size, tile_size, 1);
     dim3 independent_grid(tiles_count, tiles_count, 1);
     for (candidate_idx_t k = 0; k < tiles_count; k++) {
-        _cuda_diagonal<tile_size><<<1, tile_shape>>>(num_candidates, k, graph);
-        _cuda_partially_independent<tile_size><<<tiles_count, tile_shape>>>(num_candidates, k, graph);
+        cuda_diagonal_<tile_size><<<1, tile_shape>>>(num_candidates, k, graph);
+        cuda_partially_independent_<tile_size><<<tiles_count, tile_shape>>>(num_candidates, k, graph);
         if (supports_tma && allow_tma)
-            _cuda_independent_hopper<tile_size>
+            cuda_independent_hopper_<tile_size>
                 <<<independent_grid, tile_shape>>>(num_candidates, k, strongest_paths_tensor_map);
         else
-            _cuda_independent<tile_size><<<independent_grid, tile_shape>>>(num_candidates, k, graph);
+            cuda_independent_<tile_size><<<independent_grid, tile_shape>>>(num_candidates, k, graph);
 
         error = cudaGetLastError();
         if (error != cudaSuccess)
@@ -551,7 +551,7 @@ void compute_strongest_paths_cuda( //
  * @param b_col Column index of the second input tile in the global matrix.
  */
 template <std::uint32_t tile_size, bool may_be_diagonal = true>
-inline void _process_tile_openmp(                 //
+inline void process_tile_openmp_(                 //
     votes_count_tile<tile_size>& c,               //
     votes_count_tile<tile_size> const& a,         //
     votes_count_tile<tile_size> const& b,         //
@@ -699,7 +699,7 @@ void compute_strongest_paths_openmp(                        //
             alignas(64) votes_count_t c[tile_size][tile_size];
             memcpy2d<tile_size, check_tail>(graph + k * tile_size * num_candidates + k * tile_size, num_candidates, c,
                                             num_candidates - k * tile_size, num_candidates - k * tile_size);
-            _process_tile_openmp<tile_size>(  //
+            process_tile_openmp_<tile_size>(  //
                 c, c, c,                      //
                 tile_size * k, tile_size * k, //
                 tile_size * k, tile_size * k, //
@@ -719,7 +719,7 @@ void compute_strongest_paths_openmp(                        //
                                             num_candidates - i * tile_size, num_candidates - k * tile_size);
             memcpy2d<tile_size, check_tail>(graph + k * tile_size * num_candidates + k * tile_size, num_candidates, b,
                                             num_candidates - k * tile_size, num_candidates - k * tile_size);
-            _process_tile_openmp<tile_size>(  //
+            process_tile_openmp_<tile_size>(  //
                 c, c, b,                      //
                 i * tile_size, k * tile_size, //
                 i * tile_size, k * tile_size, //
@@ -738,7 +738,7 @@ void compute_strongest_paths_openmp(                        //
                                             num_candidates - k * tile_size, num_candidates - j * tile_size);
             memcpy2d<tile_size, check_tail>(graph + k * tile_size * num_candidates + k * tile_size, num_candidates, a,
                                             num_candidates - k * tile_size, num_candidates - k * tile_size);
-            _process_tile_openmp<tile_size>(  //
+            process_tile_openmp_<tile_size>(  //
                 c, a, c,                      //
                 k * tile_size, j * tile_size, //
                 k * tile_size, k * tile_size, //
@@ -763,14 +763,14 @@ void compute_strongest_paths_openmp(                        //
                 memcpy2d<tile_size, check_tail>(graph + k * tile_size * num_candidates + j * tile_size, num_candidates,
                                                 b, num_candidates - k * tile_size, num_candidates - j * tile_size);
                 if (i != j)
-                    _process_tile_openmp<tile_size, false>( //
+                    process_tile_openmp_<tile_size, false>( //
                         c, a, b,                            //
                         i * tile_size, j * tile_size,       //
                         i * tile_size, k * tile_size,       //
                         k * tile_size, j * tile_size        //
                     );
                 else
-                    _process_tile_openmp<tile_size, true>( //
+                    process_tile_openmp_<tile_size, true>( //
                         c, a, b,                           //
                         i * tile_size, j * tile_size,      //
                         i * tile_size, k * tile_size,      //
