@@ -16,3 +16,20 @@ build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
 dev = ["numba", "cupy-cuda12x", "pycuda>=2025.1.2", "pytest"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge", "https://conda.modular.com/max"]
+platforms = ["linux-64"]
+
+[tool.pixi.dependencies]
+python = ">=3.11,<3.14"
+max = ">=25.6.1,<26"
+
+[tool.pixi.pypi-dependencies]
+ScalingDemocracy = { path = ".", editable = true }
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+
+[tool.pixi.tasks]
