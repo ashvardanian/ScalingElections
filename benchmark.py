@@ -13,12 +13,16 @@ Usage:
 See: https://github.com/ashvardanian/ScalingDemocracy
 """
 from typing import Sequence, Tuple, List
+import warnings
 
 import numpy as np
 from numba import njit, prange, get_num_threads
 
 from scaling_democracy import log_gpus  # type: ignore
 from scaling_democracy import compute_strongest_paths  # type: ignore
+
+# Suppress Numba TBB threading layer warnings
+warnings.filterwarnings("ignore", message=".*TBB threading layer.*")
 
 
 @njit
