@@ -2,7 +2,7 @@
 name = "ScalingDemocracy"
 channels = ["conda-forge", "https://conda.modular.com/max"]
 platforms = ["linux-64"]
-description = "Mojo implementation of the Schulze voting algorithm"
+description = "GPU-accelerated Schulze voting algorithm in Mojo 🔥"
 
 [dependencies]
 python = "3.12.*"

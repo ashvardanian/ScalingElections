@@ -423,7 +423,7 @@ if __name__ == "__main__":
     # Always run serial first as baseline (unless --no-serial)
     serial_result = None
     if run_serial:
-        print("→ Serial")
+        print("→ Serial (Numba)")
         try:
             start_time = time.time()
             sub_serial_result = compute_strongest_paths_numba_serial(sub_preferences)
@@ -443,8 +443,8 @@ if __name__ == "__main__":
     # Run other implementations and validate against serial
     for name, wanted, callback in [
         ("Tiled CPU (Numba)", args.run_cpu, compute_strongest_paths_numba_tiled),
-        ("OpenMP", args.run_cpu, compute_strongest_paths_openmp),
-        ("Tiled GPU", args.run_gpu, compute_strongest_paths_cuda),
+        ("Tiled CPU (C++ with OpenMP)", args.run_cpu, compute_strongest_paths_openmp),
+        ("Tiled GPU (CUDA)", args.run_gpu, compute_strongest_paths_cuda),
     ]:
         if not wanted:
             continue

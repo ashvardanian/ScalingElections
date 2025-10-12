@@ -1055,8 +1055,8 @@ fn main():
     # Run serial baseline (unless --no-serial)
     if run_serial:
         try:
-            print("→ Serial")
-            var serial_result = benchmark_implementation("Serial", compute_strongest_paths_serial, preferences)
+            print("→ Serial (Mojo)")
+            var serial_result = benchmark_implementation("Serial (Mojo)", compute_strongest_paths_serial, preferences)
             baseline = serial_result^
             has_baseline = True
             var result_tuple = compute_winner(num_candidates, baseline)
@@ -1071,8 +1071,8 @@ fn main():
     # Run CPU implementation
     if run_cpu:
         try:
-            print("→ Tiled CPU")
-            var cpu_result = benchmark_implementation("Tiled CPU", compute_strongest_paths_tiled_cpu, preferences)
+            print("→ Tiled CPU (Mojo)")
+            var cpu_result = benchmark_implementation("Tiled CPU (Mojo)", compute_strongest_paths_tiled_cpu, preferences)
 
             if has_baseline and validate_results(cpu_result, baseline):
                 print("  ✓ Results validated")
@@ -1093,8 +1093,8 @@ fn main():
     # Run GPU implementation
     if run_gpu:
         try:
-            print("→ Tiled GPU")
-            var gpu_result = benchmark_implementation("Tiled GPU", compute_strongest_paths_gpu_wrapper, preferences)
+            print("→ Tiled GPU (Mojo)")
+            var gpu_result = benchmark_implementation("Tiled GPU (Mojo)", compute_strongest_paths_gpu_wrapper, preferences)
 
             if has_baseline and validate_results(gpu_result, baseline):
                 print("  ✓ Results validated")
