@@ -8,6 +8,8 @@ It's built as a single `scaling_democracy.cu` CUDA file, wrapped with PyBind11, 
 
 ## Usage
 
+### Python
+
 Pull:
 
 ```sh
@@ -18,16 +20,16 @@ cd ScalingDemocracy
 Build the environment and run with `uv`:
 
 ```sh
-uv venv -p python3.12 .   # Pick a recent Python version
-uv sync --extra dev       # Build locally and install dependencies
-uv run benchmark.py       # Run the default problem size
+uv venv -p python3.12               # Pick a recent Python version
+uv sync --extra dev                 # Build locally and install dependencies
+uv run benchmark.py                 # Run the default problem size
 ```
 
 Alternatively, with your local environment:
 
 ```sh
-pip install -e .         # Build locally and install dependencies
-python benchmark.py      # Run the default problem size
+pip install -e . --force-reinstall  # Build locally and install dependencies
+python benchmark.py                 # Run the default problem size
 ```
 
 Or with custom parameters for the shape and the backends:
@@ -37,6 +39,32 @@ uv run benchmark.py \
     --num-candidates 4096 --num-voters 4096 --tile-size 32 \
     --run-openmp --run-numba --run-serial --run-cuda
 ```
+
+### Mojo
+
+This repository also includes a pure Mojo implementation in `scaling_democracy.mojo`.
+To install and run it, use `pixi`:
+
+```sh
+pixi install
+pixi run mojo scaling_democracy.mojo --help
+pixi run mojo scaling_democracy.mojo --num-candidates 4096 --num-voters 4096
+```
+
+Or compile and run as a standalone binary:
+
+```sh
+pixi run mojo build scaling_democracy.mojo -o schulze
+./schulze --num-candidates 256 --num-voters 4000
+```
+
+Available command-line options:
+- `--num-candidates N`: Number of candidates (default: 128)
+- `--num-voters N`: Number of voters (default: 2000)
+- `--tile-size N`: Tile size for blocked algorithm (default: 16, compile-time constant)
+- `--serial-only`: Run only serial implementation
+- `--tiled-only`: Run only tiled CPU implementation
+- `--help, -h`: Show help message
 
 ## Links
 
@@ -69,8 +97,8 @@ As the matrix grows, the GPU utilization improves and the experimentally observe
 Comparing to Arm-based CPUs and native SIMD-accelerated code would be more fair.
 Repeating the experiment with 192-core AWS Graviton 4 chips, the timings with tile-size 32 are:
 
-| Candidates | Numba on `c8g` | OpenMP on `c8g` | OpenMP + NEON on `c8g` | CUDA on `h100` |
-| :--------- | -------------: | --------------: | ---------------------: | -------------: |
+| Candidates | Numba on `c8g` | OpenMP on `c8g` | OpenMP + NEON on `c8g` | CUDA on `h100` | Mojo on `h100` |
+| :--------- | -------------: | --------------: | ---------------------: | -------------: | -------------: |
 | 2'048      |         1.14 s |          0.35 s |                 0.16 s |                |
 | 4'096      |         1.84 s |          1.02 s |                 0.35 s |                |
 | 8'192      |         7.49 s |          5.50 s |                 4.64 s |         1.98 s |
