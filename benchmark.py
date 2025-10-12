@@ -1,3 +1,17 @@
+"""Benchmark suite for comparing Schulze voting algorithm implementations.
+
+This module provides benchmarking tools to compare different implementations of the
+Schulze voting method across various backends: serial Numba, parallel Numba with tiling,
+OpenMP (CPU), and CUDA (GPU). It includes utilities for building pairwise preference
+matrices from voter rankings and computing strongest paths using the Floyd-Warshall
+algorithm with block-parallel optimizations.
+
+Usage:
+    uv run benchmark.py --num-candidates 4096 --num-voters 4096 --tile-size 32 \\
+        --run-openmp --run-numba --run-serial --run-cuda
+
+See: https://github.com/ashvardanian/ScalingDemocracy
+"""
 from typing import Sequence, Tuple, List
 
 import numpy as np
