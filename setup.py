@@ -164,11 +164,11 @@ ext_modules = [
 ]
 
 setup(
-    name="scaling-democracy",
+    name="ScalingDemocracy",
     version=__version__,
     author="Ash Vardanian",
     author_email="1983160+ashvardanian@users.noreply.github.com",
-    url="https://github.com/ashvardanian/scaling-democracy",
+    url="https://github.com/ashvardanian/ScalingDemocracy",
     description="GPU-accelerated Schulze voting algorithm",
     long_description=long_description,
     ext_modules=ext_modules,

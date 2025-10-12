@@ -11,8 +11,8 @@ It's built as a single `scaling_democracy.cu` CUDA file, wrapped with PyBind11, 
 Pull:
 
 ```sh
-git clone https://github.com/ashvardanian/scaling-democracy.git
-cd scaling-democracy
+git clone https://github.com/ashvardanian/ScalingDemocracy.git
+cd ScalingDemocracy
 ```
 
 Build the environment and run with `uv`:

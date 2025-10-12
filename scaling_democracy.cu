@@ -3,7 +3,7 @@
  * @file   scaling_democracy.cu
  * @author Ash Vardanian
  * @date   July 12, 2024
- * @see    https://ashvardanian.com/scaling-democracy
+ * @see    https://ashvardanian.com/ScalingDemocracy
  */
 #include <algorithm> // `std::min`, `std::max`
 #include <csignal>   // `std::signal`

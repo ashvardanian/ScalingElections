@@ -1,5 +1,5 @@
 [project]
-name = "scaling-democracy"
+name = "ScalingDemocracy"
 version = "0.2.0"
 description = "GPU-accelerated Schulze voting algorithm"
 readme = "README.md"
@@ -7,7 +7,7 @@ requires-python = ">=3.7"
 authors = [
     { name = "Ash Vardanian", email = "1983160+ashvardanian@users.noreply.github.com" },
 ]
-urls = { Homepage = "https://github.com/ashvardanian/scaling-democracy" }
+urls = { Homepage = "https://github.com/ashvardanian/ScalingDemocracy" }
 dependencies = ["numpy"]
 
 [build-system]
