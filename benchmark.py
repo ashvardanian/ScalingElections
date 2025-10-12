@@ -323,53 +323,56 @@ if __name__ == "__main__":
         help="Number of candidates in the election",
     )
     parser.add_argument(
-        "--run-serial",
+        "--run-cpu",
         action="store_true",
-        help="Run the serial version of the code",
+        help="Run CPU implementations (Numba, OpenMP)",
     )
     parser.add_argument(
-        "--run-numba",
+        "--run-gpu",
         action="store_true",
-        help="Run the serial version of the code",
+        help="Run GPU implementation (CUDA)",
     )
     parser.add_argument(
-        "--run-openmp",
+        "--no-serial",
         action="store_true",
-        help="Run the serial version of the code",
+        help="Skip serial baseline",
     )
     parser.add_argument(
-        "--run-cuda",
-        action="store_true",
-        help="Run the serial version of the code",
-    )
-    parser.add_argument(
-        "--tile-size",
+        "--cpu-tile-size",
         type=int,
-        default=0,
-        help="Tile size for the tiling optimization",
+        default=16,
+        help="CPU tile size for tiling optimization",
+    )
+    parser.add_argument(
+        "--gpu-tile-size",
+        type=int,
+        default=32,
+        help="GPU tile size for tiling optimization",
     )
     args = parser.parse_args()
 
-    tile_size = args.tile_size
+    cpu_tile_size = args.cpu_tile_size
+    gpu_tile_size = args.gpu_tile_size
     num_voters = args.num_voters
     num_candidates = args.num_candidates
+    run_serial = not args.no_serial
 
     compute_strongest_paths_cuda = lambda x: compute_strongest_paths(
         x,
         allow_gpu=True,
         allow_tma=False,
-        tile_size=tile_size,
+        tile_size=gpu_tile_size,
     )
     compute_strongest_paths_openmp = lambda x: compute_strongest_paths(
         x,
         allow_gpu=False,
         allow_tma=False,
-        tile_size=tile_size,
+        tile_size=cpu_tile_size,
     )
     compute_strongest_paths_numba_tiled = (
         lambda x: compute_strongest_paths_numba_parallel(
             x,
-            tile_size=tile_size,
+            tile_size=cpu_tile_size,
         )
     )
 
@@ -387,8 +390,9 @@ if __name__ == "__main__":
     print("Configuration:")
     voters_str = f"{num_voters:,}" if num_voters > 0 else "random"
     print(f"  Problem size: {num_candidates:,} candidates × {voters_str} voters")
-    if tile_size > 0:
-        print(f"  Tile size: {tile_size} × {tile_size}")
+    print(f"  CPU tile: {cpu_tile_size} × {cpu_tile_size}")
+    if args.run_gpu:
+        print(f"  GPU tile: {gpu_tile_size} × {gpu_tile_size}")
     print(f"  CPU threads: {get_num_threads()}")
     print()
 
@@ -406,18 +410,37 @@ if __name__ == "__main__":
 
     # Warm-up: run all functions on tiny inputs first to avoid JIT costs
     sub_preferences = preferences[: num_candidates // 8, : num_candidates // 8]
-    sub_preferences_baseline = compute_strongest_paths_numba_serial(sub_preferences)
 
     # Benchmarking section
     print()
     print("─── Benchmarking ───────────────────────────────────")
     print()
 
+    # Always run serial first as baseline (unless --no-serial)
+    serial_result = None
+    if run_serial:
+        print("→ Serial")
+        try:
+            start_time = time.time()
+            sub_serial_result = compute_strongest_paths_numba_serial(sub_preferences)
+            elapsed_time = time.time() - start_time
+            print(f"  Warm-up: {format_time(elapsed_time)}")
+
+            start_time = time.time()
+            serial_result = compute_strongest_paths_numba_serial(preferences)
+            elapsed_time = time.time() - start_time
+            throughput = num_candidates**3 / elapsed_time
+            print(f"  Run:     {format_time(elapsed_time)} │ {format_throughput(throughput)}")
+        except Exception as e:
+            print(f"  ✗ Benchmark failed: {e}")
+
+        print()
+
+    # Run other implementations and validate against serial
     for name, wanted, callback in [
-        ("Tiled CPU", args.run_numba, compute_strongest_paths_numba_tiled),
-        ("Tiled GPU", args.run_cuda, compute_strongest_paths_cuda),
-        ("OpenMP", args.run_openmp, compute_strongest_paths_openmp),
-        ("Serial", args.run_serial, compute_strongest_paths_numba_serial),
+        ("Tiled CPU (Numba)", args.run_cpu, compute_strongest_paths_numba_tiled),
+        ("OpenMP", args.run_cpu, compute_strongest_paths_openmp),
+        ("Tiled GPU", args.run_gpu, compute_strongest_paths_cuda),
     ]:
         if not wanted:
             continue
@@ -427,34 +450,42 @@ if __name__ == "__main__":
         # Warm-up run
         try:
             start_time = time.time()
-            sub_preferences_result = callback(sub_preferences)
+            sub_result = callback(sub_preferences)
             elapsed_time = time.time() - start_time
             print(f"  Warm-up: {format_time(elapsed_time)}")
         except Exception as e:
             print(f"  ✗ Warm-up failed: {e}")
-            continue
-
-        # Verify correctness
-        if not np.array_equal(sub_preferences_result, sub_preferences_baseline):
-            print(f"  ✗ Results don't match baseline!")
+            print()
             continue
 
         # Main benchmark run
         try:
             start_time = time.time()
-            callback(preferences)
+            result = callback(preferences)
             elapsed_time = time.time() - start_time
             throughput = num_candidates**3 / elapsed_time
             print(f"  Run:     {format_time(elapsed_time)} │ {format_throughput(throughput)}")
+
+            # Validate against serial baseline if available
+            if serial_result is not None:
+                if np.array_equal(result, serial_result):
+                    print(f"  ✓ Results validated")
+                else:
+                    print(f"  ✗ Results don't match baseline!")
         except Exception as e:
             print(f"  ✗ Benchmark failed: {e}")
-            continue
 
         print()
 
-    # Determine the winner and ranking
-    candidates = list(range(sub_preferences.shape[0]))
-    winner, ranking = get_winner_and_ranking(candidates, sub_preferences_baseline)
+    # Determine the winner and ranking (use serial if available, otherwise first result)
+    if serial_result is not None:
+        result_for_winner = serial_result
+    else:
+        # Use a small sample for winner determination
+        result_for_winner = compute_strongest_paths_numba_serial(sub_preferences)
+
+    candidates = list(range(result_for_winner.shape[0]))
+    winner, ranking = get_winner_and_ranking(candidates, result_for_winner)
 
     # Print election results
     print("─── Election Results ───────────────────────────────")

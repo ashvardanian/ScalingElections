@@ -8,6 +8,18 @@ It's built as a single `scaling_democracy.cu` CUDA file, wrapped with PyBind11, 
 
 ## Usage
 
+Both Python and Mojo implementations are included.
+Both support the same CLI arguments:
+
+- `--no-serial`: Skip serial baseline
+- `--num-candidates N`: Number of candidates (default: 128)
+- `--num-voters N`: Number of voters (default: 2000)
+- `--run-cpu`: Run CPU implementations
+- `--run-gpu`: Run GPU implementation
+- `--cpu-tile-size N`: CPU tile size (default: 16)
+- `--gpu-tile-size N`: GPU tile size (default: 32)
+- `--help, -h`: Show help message
+
 ### Python
 
 Pull:
@@ -23,6 +35,7 @@ Build the environment and run with `uv`:
 uv venv -p python3.12               # Pick a recent Python version
 uv sync --extra dev                 # Build locally and install dependencies
 uv run benchmark.py                 # Run the default problem size
+uv run benchmark.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 ```
 
 Alternatively, with your local environment:
@@ -30,14 +43,6 @@ Alternatively, with your local environment:
 ```sh
 pip install -e . --force-reinstall  # Build locally and install dependencies
 python benchmark.py                 # Run the default problem size
-```
-
-Or with custom parameters for the shape and the backends:
-
-```sh
-uv run benchmark.py \
-    --num-candidates 4096 --num-voters 4096 --tile-size 32 \
-    --run-openmp --run-numba --run-serial --run-cuda
 ```
 
 ### Mojo
@@ -48,23 +53,15 @@ To install and run it, use `pixi`:
 ```sh
 pixi install
 pixi run mojo scaling_democracy.mojo --help
-pixi run mojo scaling_democracy.mojo --num-candidates 4096 --num-voters 4096
+pixi run mojo scaling_democracy.mojo --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 ```
 
 Or compile and run as a standalone binary:
 
 ```sh
 pixi run mojo build scaling_democracy.mojo -o schulze
-./schulze --num-candidates 256 --num-voters 4000
+./schulze --num-candidates 4096 --run-cpu --run-gpu
 ```
-
-Available command-line options:
-- `--num-candidates N`: Number of candidates (default: 128)
-- `--num-voters N`: Number of voters (default: 2000)
-- `--tile-size N`: CPU tile size for blocked algorithm (default: 16, compile-time constant)
-- `--serial-only`: Run only serial implementation
-- `--tiled-only`: Run only tiled CPU implementation
-- `--help, -h`: Show help message
 
 ## Links
 
@@ -99,11 +96,11 @@ Repeating the experiment with 192-core AWS Graviton 4 chips, the timings with ti
 
 | Candidates | Numba on `c8g` | OpenMP on `c8g` | OpenMP + NEON on `c8g` | CUDA on `h100` | Mojo on `h100` |
 | :--------- | -------------: | --------------: | ---------------------: | -------------: | -------------: |
-| 2'048      |         1.14 s |          0.35 s |                 0.16 s |                |
-| 4'096      |         1.84 s |          1.02 s |                 0.35 s |                |
-| 8'192      |         7.49 s |          5.50 s |                 4.64 s |         1.98 s |
-| 16'384     |        38.04 s |         24.67 s |                24.20 s |         9.53 s |
-| 32'768     |       302.85 s |        246.85 s |               179.82 s |        42.90 s |
+| 2'048      |         1.14 s |          0.35 s |                 0.16 s |                |                |
+| 4'096      |         1.84 s |          1.02 s |                 0.35 s |                |                |
+| 8'192      |         7.49 s |          5.50 s |                 4.64 s |         1.98 s |                |
+| 16'384     |        38.04 s |         24.67 s |                24.20 s |         9.53 s |                |
+| 32'768     |       302.85 s |        246.85 s |               179.82 s |        42.90 s |                |
 
 Comparing the numbers, we are still looking at a roughly 4x speedup of CUDA for the largest matrix size tested for a comparable power consumption and hardware rental cost.
 
@@ -112,7 +109,7 @@ Comparing the numbers, we are still looking at a roughly 4x speedup of CUDA for 
 With NVIDIA Nsight Compute CLI we can dissect the kernels and see that there is more room for improvement:
 
 ```sh
-ncu uv run benchmark.py --num-candidates 4096 --num-voters 4096 --tile-size 32 --run-cuda
+ncu uv run benchmark.py --num-candidates 4096 --num-voters 4096 --gpu-tile-size 32 --run-gpu
 >  void _cuda_independent<32>(unsigned int, unsigned int, unsigned int *) (128, 128, 1)x(32, 32, 1), Context 1, Stream 7, Device 0, CC 9.0
 >    Section: GPU Speed Of Light Throughput
 >    ----------------------- ----------- ------------
