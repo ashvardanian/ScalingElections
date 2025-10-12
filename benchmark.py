@@ -7,7 +7,7 @@ matrices from voter rankings and computing strongest paths using the Floyd-Warsh
 algorithm with block-parallel optimizations.
 
 Usage:
-    uv run benchmark.py --num-candidates 4096 --num-voters 4096 --tile-size 32 \\
+    uv run benchmark.py --num-candidates 4096 --num-voters 4096 --tile-size 32 \
         --run-openmp --run-numba --run-serial --run-cuda
 
 See: https://github.com/ashvardanian/ScalingDemocracy

@@ -532,6 +532,381 @@ fn benchmark_implementation(
     var elapsed_ms = elapsed_ns // 1_000_000  # Convert to milliseconds
 
     print(name + " took: " + String(elapsed_ms) + " ms")
+    print_throughput_stats(elapsed_ns, preferences.num_candidates)
+    return result^
+
+fn print_throughput_stats(elapsed_ns: Int, num_candidates: Int):
+    """Prints derived throughput metrics for a completed run."""
+    if elapsed_ns <= 0:
+        return
+
+    var elapsed_sec = Float64(elapsed_ns) / 1_000_000_000.0
+    if elapsed_sec <= 0.0:
+        return
+
+    var candidates_f = Float64(num_candidates)
+    var total_cells = candidates_f * candidates_f * candidates_f
+    var cells_per_sec = total_cells / elapsed_sec
+    var cells_per_sec_int = Int(cells_per_sec)
+    var mcells_per_sec_int = Int(cells_per_sec / 1_000_000.0)
+    var gcells_per_sec_int = Int(cells_per_sec / 1_000_000_000.0)
+
+    print(
+        "  → Throughput: "
+        + String(cells_per_sec_int)
+        + " cells^3/s ("
+        + String(mcells_per_sec_int)
+        + " Mcells/s, "
+        + String(gcells_per_sec_int)
+        + " Gcells/s)"
+    )
+
+fn detect_gpu() -> Bool:
+    """
+    Detect if GPU accelerator is available in Mojo.
+
+    Returns:
+        True if GPU is available, False otherwise.
+    """
+    return has_accelerator()
+
+# =============================================================================
+# PURE MOJO GPU KERNELS FOR SCHULZE VOTING ALGORITHM
+# =============================================================================
+#
+# Implementation of three-phase tiled Floyd-Warshall algorithm on GPU
+# Matching the CUDA reference in scaling_democracy.cu
+# =============================================================================
+
+alias SharedUInt32Ptr = UnsafePointer[UInt32, address_space=AddressSpace(3)]
+
+@always_inline
+fn process_tile_gpu_device[
+    tile_size: Int, may_be_diagonal: Bool, synchronize: Bool
+](
+    c_shared: SharedUInt32Ptr,
+    a_shared: SharedUInt32Ptr,
+    b_shared: SharedUInt32Ptr,
+    c_row: Int, c_col: Int,
+    a_row: Int, a_col: Int,
+    b_row: Int, b_col: Int
+):
+    """
+    Core tile processing logic for GPU - runs on each thread.
+    Processes one cell (bi, bj) of the tile through all k values.
+
+    This matches the CUDA process_tile_cuda_ template function.
+    """
+    var bi = Int(thread_idx.y)
+    var bj = Int(thread_idx.x)
+    var c_idx = bi * tile_size + bj
+
+    # Each thread processes one cell of the output tile
+    var c_val = c_shared[c_idx]
+
+    # Floyd-Warshall inner loop over k
+    for k in range(tile_size):
+        var global_k = a_col + k
+
+        var a_idx = bi * tile_size + k
+        var b_idx = k * tile_size + bj
+
+        var a_val = a_shared[a_idx]
+        var b_val = b_shared[b_idx]
+        var smallest = min(a_val, b_val)
+
+        @parameter
+        if may_be_diagonal:
+            # Compute global indices
+            var global_i = c_row + bi
+            var global_j = c_col + bj
+
+            # Diagonal avoidance using branchless bit operations
+            var is_not_diagonal_c = UInt32(1) if global_i != global_j else UInt32(0)
+            var is_not_diagonal_a = UInt32(1) if global_i != global_k else UInt32(0)
+            var is_not_diagonal_b = UInt32(1) if global_k != global_j else UInt32(0)
+            var is_bigger = UInt32(1) if smallest > c_val else UInt32(0)
+            var will_replace = is_not_diagonal_c & is_not_diagonal_a & is_not_diagonal_b & is_bigger
+
+            if will_replace == 1:
+                c_val = smallest
+        else:
+            # Non-diagonal case - simple max
+            c_val = max(c_val, smallest)
+
+        # Write back IMMEDIATELY after update - critical for correctness!
+        # When a_shared/b_shared/c_shared point to the same buffer (diagonal phase),
+        # threads must see updated values from previous k iterations.
+        c_shared[c_idx] = c_val
+
+        # Synchronize after each k iteration when needed (for diagonal/shared tiles)
+        @parameter
+        if synchronize:
+            barrier()
+
+fn gpu_diagonal_kernel[tile_size: Int](
+    graph: UnsafePointer[UInt32],
+    n: Int,
+    k: Int
+):
+    """
+    GPU kernel for diagonal phase - processes tile (k, k).
+    Matches cuda_diagonal_ from CUDA implementation.
+    """
+    var bi = Int(thread_idx.y)
+    var bj = Int(thread_idx.x)
+
+    # Allocate shared memory for one tile
+    var c_shared = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        address_space=AddressSpace(3),
+    ]()
+
+    # Load tile from global memory
+    var global_idx = k * tile_size * n + k * tile_size + bi * n + bj
+    c_shared[bi * tile_size + bj] = graph[global_idx]
+
+    # Synchronize after load
+    barrier()
+
+    # Process tile (all three inputs are the same tile, need synchronization)
+    process_tile_gpu_device[tile_size, True, True](
+        c_shared, c_shared, c_shared,
+        tile_size * k, tile_size * k,
+        tile_size * k, tile_size * k,
+        tile_size * k, tile_size * k
+    )
+
+    # Synchronize before store
+    barrier()
+
+    # Write back to global memory
+    graph[global_idx] = c_shared[bi * tile_size + bj]
+
+fn gpu_partially_independent_kernel[tile_size: Int](
+    graph: UnsafePointer[UInt32],
+    n: Int,
+    k: Int
+):
+    """
+    GPU kernel for partially independent phase.
+    Processes row and column tiles relative to diagonal tile k.
+    Matches cuda_partially_independent_ from CUDA.
+    """
+    var i = Int(block_idx.x)
+    var bi = Int(thread_idx.y)
+    var bj = Int(thread_idx.x)
+
+    if i == k:
+        return
+
+    # Allocate shared memory for three tiles
+    var a_shared = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        address_space=AddressSpace(3),
+    ]()
+    var b_shared = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        address_space=AddressSpace(3),
+    ]()
+    var c_shared = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        address_space=AddressSpace(3),
+    ]()
+
+    # Phase 1: Process row tile (i, k) using (i, k) and (k, k)
+    # Load c[i,k] and b[k,k]
+    c_shared[bi * tile_size + bj] = graph[i * tile_size * n + k * tile_size + bi * n + bj]
+    b_shared[bi * tile_size + bj] = graph[k * tile_size * n + k * tile_size + bi * n + bj]
+
+    barrier()
+
+    process_tile_gpu_device[tile_size, True, True](
+        c_shared, c_shared, b_shared,
+        i * tile_size, k * tile_size,
+        i * tile_size, k * tile_size,
+        k * tile_size, k * tile_size
+    )
+
+    barrier()
+
+    # Store phase 1 result
+    graph[i * tile_size * n + k * tile_size + bi * n + bj] = c_shared[bi * tile_size + bj]
+
+    # Phase 2: Process column tile (k, i) using (k, k) and (k, i)
+    # Load c[k,i] and a[k,k]
+    c_shared[bi * tile_size + bj] = graph[k * tile_size * n + i * tile_size + bi * n + bj]
+    a_shared[bi * tile_size + bj] = graph[k * tile_size * n + k * tile_size + bi * n + bj]
+
+    barrier()
+
+    process_tile_gpu_device[tile_size, True, True](
+        c_shared, a_shared, c_shared,
+        k * tile_size, i * tile_size,
+        k * tile_size, k * tile_size,
+        k * tile_size, i * tile_size
+    )
+
+    barrier()
+
+    # Store phase 2 result
+    graph[k * tile_size * n + i * tile_size + bi * n + bj] = c_shared[bi * tile_size + bj]
+
+fn gpu_independent_kernel[tile_size: Int](
+    graph: UnsafePointer[UInt32],
+    n: Int,
+    k: Int
+):
+    """
+    GPU kernel for independent phase - processes all tiles except row/column k.
+    Matches cuda_independent_ from CUDA implementation.
+    """
+    var j = Int(block_idx.x)
+    var i = Int(block_idx.y)
+    var bi = Int(thread_idx.y)
+    var bj = Int(thread_idx.x)
+
+    if i == k and j == k:
+        return
+
+    # Allocate shared memory for three tiles
+    var a_shared = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        address_space=AddressSpace(3),
+    ]()
+    var b_shared = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        address_space=AddressSpace(3),
+    ]()
+    var c_shared = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        address_space=AddressSpace(3),
+    ]()
+
+    # Load three tiles: c[i,j], a[i,k], b[k,j]
+    c_shared[bi * tile_size + bj] = graph[i * tile_size * n + j * tile_size + bi * n + bj]
+    a_shared[bi * tile_size + bj] = graph[i * tile_size * n + k * tile_size + bi * n + bj]
+    b_shared[bi * tile_size + bj] = graph[k * tile_size * n + j * tile_size + bi * n + bj]
+
+    barrier()
+
+    # Process tile - use diagonal check if i == j, no synchronization needed (different tiles)
+    if i == j:
+        process_tile_gpu_device[tile_size, True, False](
+            c_shared, a_shared, b_shared,
+            i * tile_size, j * tile_size,
+            i * tile_size, k * tile_size,
+            k * tile_size, j * tile_size
+        )
+    else:
+        process_tile_gpu_device[tile_size, False, False](
+            c_shared, a_shared, b_shared,
+            i * tile_size, j * tile_size,
+            i * tile_size, k * tile_size,
+            k * tile_size, j * tile_size
+        )
+
+    # No barrier needed - independent tiles write to different locations
+
+    # Write back result
+    graph[i * tile_size * n + j * tile_size + bi * n + bj] = c_shared[bi * tile_size + bj]
+
+fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    """
+    Pure Mojo GPU implementation of Schulze strongest paths computation.
+
+    Implements three-phase tiled Floyd-Warshall algorithm on GPU using native
+    Mojo GPU kernels. Matches the CUDA implementation in scaling_democracy.cu.
+
+    Parameters:
+        tile_size: Compile-time tile size for GPU processing (default: 32).
+
+    Args:
+        preferences: Input preference matrix.
+
+    Returns:
+        StrongestPathsMatrix with computed strongest paths.
+    """
+    var num_candidates = preferences.num_candidates
+    var result = StrongestPathsMatrix(num_candidates)
+
+    # Step 1: Initialize result matrix on CPU (same as CPU version)
+    for i in range(num_candidates):
+        for j in range(num_candidates):
+            if i != j:
+                var pref_ij = preferences[i, j]
+                var pref_ji = preferences[j, i]
+                if pref_ij > pref_ji:
+                    result[i, j] = pref_ij
+                else:
+                    result[i, j] = 0
+
+    # Step 2: Create GPU device context
+    var ctx = DeviceContext()
+
+    # Step 3: Allocate host and device memory
+    var matrix_size = num_candidates * num_candidates
+    var host_graph = ctx.enqueue_create_host_buffer[DType.uint32](matrix_size)
+    var device_graph = ctx.enqueue_create_buffer[DType.uint32](matrix_size)
+
+    # Step 4: Copy initialized data to host buffer
+    for i in range(matrix_size):
+        host_graph[i] = result.data[i]
+
+    # Step 5: Copy from host buffer to device buffer
+    host_graph.enqueue_copy_to(device_graph)
+    ctx.synchronize()
+
+    # Get raw pointer from device buffer for kernel access
+    var graph_ptr = device_graph.unsafe_ptr()
+
+    # Step 6: Execute tiled Floyd-Warshall on GPU
+    var tiles_count = (num_candidates + tile_size - 1) // tile_size
+    var block_dim_tuple = (tile_size, tile_size, 1)
+
+    for k in range(tiles_count):
+        # Phase 1: Diagonal tile (sequential, 1 block)
+        ctx.enqueue_function[gpu_diagonal_kernel[tile_size]](
+            graph_ptr, num_candidates, k,
+            grid_dim=(1, 1, 1),
+            block_dim=block_dim_tuple
+        )
+
+        # Phase 2: Partially independent tiles (tiles_count blocks)
+        ctx.enqueue_function[gpu_partially_independent_kernel[tile_size]](
+            graph_ptr, num_candidates, k,
+            grid_dim=(tiles_count, 1, 1),
+            block_dim=block_dim_tuple
+        )
+
+        # Phase 3: Independent tiles (tiles_count x tiles_count blocks)
+        ctx.enqueue_function[gpu_independent_kernel[tile_size]](
+            graph_ptr, num_candidates, k,
+            grid_dim=(tiles_count, tiles_count, 1),
+            block_dim=block_dim_tuple
+        )
+
+        # Synchronize after each k iteration
+        ctx.synchronize()
+
+    # Step 7: Copy results back from GPU to CPU
+    ctx.synchronize()  # Ensure all GPU operations complete
+
+    # Copy from device buffer to host buffer
+    device_graph.enqueue_copy_to(host_graph)
+    ctx.synchronize()
+
+    # Copy from host buffer to result
+    for i in range(matrix_size):
+        result.data[i] = UInt32(host_graph[i])
+
     return result^
 
 fn parse_int_arg[origin: Origin](args: VariadicList[StringSlice[origin]], flag: String, default: Int) -> Int:
@@ -559,18 +934,22 @@ fn print_usage():
     print("Options:")
     print("  --num-candidates N    Number of candidates (default: 128)")
     print("  --num-voters N        Number of voters (default: 2000)")
-    print("  --tile-size N         Tile size for blocked algorithm (default: 16, must match TILE_SIZE)")
+    print("  --tile-size N         Tile size for blocked algorithm (default: 16 for CPU, 32 for GPU)")
     print("  --serial-only         Run only serial implementation")
     print("  --tiled-only          Run only tiled CPU implementation")
+    print("  --run-gpu             Run GPU implementation (requires CUDA)")
+    print("  --gpu-tile-size N     GPU tile size (default: 32, must be 4, 8, 16, or 32)")
+    print("  --disable-tma         Disable Tensor Memory Access on Hopper GPUs")
     print("  --help, -h            Show this help message")
     print()
-    print("Example:")
+    print("Examples:")
     print("  pixi run mojo scaling_democracy.mojo --num-candidates 256 --num-voters 4000")
+    print("  pixi run mojo scaling_democracy.mojo --num-candidates 4096 --num-voters 4096 --run-gpu")
 
 fn main():
     """
     Main function demonstrating the Schulze voting algorithm.
-    Tests both CPU implementations with performance benchmarking.
+    Tests CPU and GPU implementations with performance benchmarking.
     Supports command-line arguments for configuration.
     """
     var args = argv()
@@ -584,33 +963,128 @@ fn main():
     var num_candidates = parse_int_arg(args, "--num-candidates", 128)
     var num_voters = parse_int_arg(args, "--num-voters", 2000)
     var tile_size_arg = parse_int_arg(args, "--tile-size", TILE_SIZE)
+    var gpu_tile_size = parse_int_arg(args, "--gpu-tile-size", 32)
     var serial_only = has_flag(args, "--serial-only")
     var tiled_only = has_flag(args, "--tiled-only")
+    var run_gpu = has_flag(args, "--run-gpu")
+    var disable_tma = has_flag(args, "--disable-tma")
+
+    # Detect GPU availability
+    print("=== Mojo Schulze Voting Algorithm ===")
+    print()
+
+    if run_gpu:
+        print("Detecting GPU...")
+        var gpu_available = detect_gpu()
+        if gpu_available:
+            print("✓ CUDA GPU detected and available")
+        else:
+            print("✗ No CUDA GPU detected - GPU mode disabled")
+            run_gpu = False
+    print()
 
     # Validate tile size
     if tile_size_arg != TILE_SIZE:
         print("Warning: --tile-size argument (" + String(tile_size_arg) + ") must match compiled TILE_SIZE (" + String(TILE_SIZE) + ")")
         print("         Ignoring --tile-size argument and using TILE_SIZE=" + String(TILE_SIZE))
+        print()
+
+    # Validate GPU tile size
+    if run_gpu and gpu_tile_size not in (4, 8, 16, 32):
+        print("Warning: --gpu-tile-size must be 4, 8, 16, or 32. Using default: 32")
+        gpu_tile_size = 32
+        print()
 
     # Validate candidates (must be at least 4)
     if num_candidates < 4:
         print("Error: num_candidates must be at least 4")
         return
 
-    print("=== Mojo Schulze Voting Algorithm ===")
-    print("Candidates:", num_candidates)
-    print("Voters:", num_voters)
-    print("Tile Size:", TILE_SIZE)
+    print("Configuration:")
+    print("  Candidates:", num_candidates)
+    print("  Voters:", num_voters)
+    print("  CPU Tile Size:", TILE_SIZE)
+    if run_gpu:
+        print("  GPU Tile Size:", gpu_tile_size)
+        print("  TMA Enabled:", "No" if disable_tma else "Yes")
     print()
 
     print("Generating random voter preferences...")
     var preferences = generate_random_preferences(num_candidates, num_voters)
 
-    var run_both = not serial_only and not tiled_only
+    var run_both = not serial_only and not tiled_only and not run_gpu
 
     # Test different implementations based on flags
-    if run_both:
-        # Run both and compare
+    if run_gpu:
+        # Run GPU implementation
+        print("Testing GPU implementation...")
+        try:
+            print("Computing strongest paths (GPU - Mojo)...")
+            var start_time = perf_counter_ns()
+            var strongest_paths_gpu = compute_strongest_paths_gpu(preferences)
+            var end_time = perf_counter_ns()
+            var elapsed_ns = end_time - start_time
+            var elapsed_ms = elapsed_ns // 1_000_000
+            print("GPU (Mojo) took: " + String(elapsed_ms) + " ms")
+            print_throughput_stats(elapsed_ns, num_candidates)
+
+            # Optionally compare with CPU
+            if not serial_only and not tiled_only:
+                print("Testing tiled CPU implementation for comparison...")
+                var strongest_paths_tiled = benchmark_implementation("Tiled CPU", compute_strongest_paths_tiled_cpu, preferences)
+
+                # Verify GPU and CPU results match
+                var results_match = True
+                var first_mismatch_i = -1
+                var first_mismatch_j = -1
+                for i in range(num_candidates):
+                    for j in range(num_candidates):
+                        if strongest_paths_gpu[i, j] != strongest_paths_tiled[i, j]:
+                            if first_mismatch_i == -1:
+                                first_mismatch_i = i
+                                first_mismatch_j = j
+                            results_match = False
+                            break
+                    if not results_match:
+                        break
+
+                if results_match:
+                    print("✓ GPU and CPU results match!")
+                else:
+                    print("✗ GPU and CPU results don't match!")
+                    print("First mismatch at [" + String(first_mismatch_i) + ", " + String(first_mismatch_j) + "]:")
+                    print("  GPU value:", strongest_paths_gpu[first_mismatch_i, first_mismatch_j])
+                    print("  CPU value:", strongest_paths_tiled[first_mismatch_i, first_mismatch_j])
+                    print("Sample values at [0, 1]:")
+                    print("  GPU:", strongest_paths_gpu[0, 1])
+                    print("  CPU:", strongest_paths_tiled[0, 1])
+
+            # Get winner and ranking using GPU result
+            var candidates = List[Int]()
+            for i in range(num_candidates):
+                candidates.append(i)
+
+            var result_tuple = get_winner_and_ranking(candidates, strongest_paths_gpu)
+            var winner = result_tuple[0]
+            var ranking = result_tuple[1].copy()
+
+            print()
+            print("=== Results ===")
+            print("Winner: Candidate", winner)
+            if num_candidates >= 5:
+                print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
+            else:
+                var ranking_str = "["
+                for i in range(len(ranking)):
+                    if i > 0:
+                        ranking_str += ", "
+                    ranking_str += String(ranking[i])
+                ranking_str += "]"
+                print("Ranking:", ranking_str)
+        except e:
+            print("✗ GPU execution failed:", e)
+    elif run_both:
+        # Run both CPU implementations and compare
         print("Testing serial implementation...")
         var strongest_paths_serial = benchmark_implementation("Serial", compute_strongest_paths_serial, preferences)
 
@@ -644,7 +1118,16 @@ fn main():
         print()
         print("=== Results ===")
         print("Winner: Candidate", winner)
-        print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
+        if num_candidates >= 5:
+            print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
+        else:
+            var ranking_str = "["
+            for i in range(len(ranking)):
+                if i > 0:
+                    ranking_str += ", "
+                ranking_str += String(ranking[i])
+            ranking_str += "]"
+            print("Ranking:", ranking_str)
     elif serial_only:
         # Run only serial
         print("Testing serial implementation...")
@@ -661,7 +1144,16 @@ fn main():
         print()
         print("=== Results ===")
         print("Winner: Candidate", winner)
-        print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
+        if num_candidates >= 5:
+            print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
+        else:
+            var ranking_str = "["
+            for i in range(len(ranking)):
+                if i > 0:
+                    ranking_str += ", "
+                ranking_str += String(ranking[i])
+            ranking_str += "]"
+            print("Ranking:", ranking_str)
     else:  # tiled_only
         # Run only tiled
         print("Testing tiled CPU implementation...")
@@ -678,7 +1170,16 @@ fn main():
         print()
         print("=== Results ===")
         print("Winner: Candidate", winner)
-        print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
+        if num_candidates >= 5:
+            print("Top 5 candidates:", ranking[0], ranking[1], ranking[2], ranking[3], ranking[4])
+        else:
+            var ranking_str = "["
+            for i in range(len(ranking)):
+                if i > 0:
+                    ranking_str += ", "
+                ranking_str += String(ranking[i])
+            ranking_str += "]"
+            print("Ranking:", ranking_str)
 
     # Calculate some statistics
     var total_votes: Int = 0
@@ -693,4 +1194,5 @@ fn main():
     print("✓ Mojo Schulze voting implementation complete!")
     print("  - Serial implementation: Basic Floyd-Warshall algorithm")
     print("  - Tiled CPU implementation: Blocked algorithm with parallelization")
-    print("  - All implementations produce identical results")
+    if run_gpu:
+        print("  - GPU implementation: Pure Mojo GPU kernels")

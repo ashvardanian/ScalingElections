@@ -61,7 +61,7 @@ pixi run mojo build scaling_democracy.mojo -o schulze
 Available command-line options:
 - `--num-candidates N`: Number of candidates (default: 128)
 - `--num-voters N`: Number of voters (default: 2000)
-- `--tile-size N`: Tile size for blocked algorithm (default: 16, compile-time constant)
+- `--tile-size N`: CPU tile size for blocked algorithm (default: 16, compile-time constant)
 - `--serial-only`: Run only serial implementation
 - `--tiled-only`: Run only tiled CPU implementation
 - `--help, -h`: Show help message
