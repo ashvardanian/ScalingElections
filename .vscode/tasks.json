@@ -40,7 +40,7 @@
         "-g",
         "-O0",
         "--std=c++17",
-        "-DSCALING_DEMOCRACY_TEST"
+        "-DSCALING_ELECTIONS_TEST"
       ],
       "group": {
         "kind": "build",

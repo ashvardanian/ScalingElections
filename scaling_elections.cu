@@ -17,17 +17,17 @@
 #include <omp.h> // `omp_set_num_threads`
 
 #if (defined(__ARM_NEON) || defined(__aarch64__))
-#define SCALING_DEMOCRACY_WITH_NEON (1)
+#define SCALING_ELECTIONS_WITH_NEON (1)
 #endif
 #if defined(__NVCC__)
-#define SCALING_DEMOCRACY_WITH_CUDA (1)
+#define SCALING_ELECTIONS_WITH_CUDA (1)
 #endif
 
-#if defined(SCALING_DEMOCRACY_WITH_NEON)
+#if defined(SCALING_ELECTIONS_WITH_NEON)
 #include <arm_neon.h>
 #endif
 
-#if defined(SCALING_DEMOCRACY_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
 #include <cuda.h> // `CUtensorMap`
 #include <cuda/barrier>
 #include <cudaTypedefs.h> // `PFN_cuTensorMapEncodeTiled`
@@ -39,7 +39,7 @@
 /*
  * If we are only testing the raw kernels, we don't need to link to PyBind.
  */
-#if !defined(SCALING_DEMOCRACY_TEST)
+#if !defined(SCALING_ELECTIONS_TEST)
 #include <pybind11/numpy.h> // `array_t`
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -48,10 +48,10 @@ namespace py = pybind11;
 #endif
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300
-#define SCALING_DEMOCRACY_KEPLER (1)
+#define SCALING_ELECTIONS_KEPLER (1)
 #endif
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-#define SCALING_DEMOCRACY_HOPPER (1)
+#define SCALING_ELECTIONS_HOPPER (1)
 #endif
 
 using votes_count_t = std::uint32_t;
@@ -68,12 +68,12 @@ void signal_handler(int signal) { global_signal_status = signal; }
 
 #pragma region CUDA
 
-#if defined(SCALING_DEMOCRACY_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
 
 namespace cde = cuda::device::experimental;
 using barrier_t = cuda::barrier<cuda::thread_scope_block>;
 
-#if defined(SCALING_DEMOCRACY_KEPLER)
+#if defined(SCALING_ELECTIONS_KEPLER)
 
 /**
  * @brief   Processes a tile of the preferences matrix for the block-parallel Schulze voting algorithm
@@ -323,7 +323,7 @@ __global__ void cuda_independent_hopper_(candidate_idx_t n, candidate_idx_t k,
     candidate_idx_t const bi = threadIdx.y;
     candidate_idx_t const bj = threadIdx.x;
 
-#if defined(SCALING_DEMOCRACY_HOPPER)
+#if defined(SCALING_ELECTIONS_HOPPER)
 
     if (i == k && j == k)
         return;
@@ -559,7 +559,7 @@ inline void process_tile_openmp_(                 //
     candidate_idx_t a_row, candidate_idx_t a_col, //
     candidate_idx_t b_row, candidate_idx_t b_col) {
 
-#if defined(SCALING_DEMOCRACY_WITH_NEON)
+#if defined(SCALING_ELECTIONS_WITH_NEON)
     if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size % 4 == 0) {
         uint32x4_t bj_step = {0, 1, 2, 3};
         for (candidate_idx_t k = 0; k < tile_size; k++) {
@@ -600,8 +600,10 @@ inline void process_tile_openmp_(                 //
 #else
     for (candidate_idx_t k = 0; k < tile_size; k++) {
         for (candidate_idx_t bi = 0; bi < tile_size; bi++) {
+            votes_count_t* const c_cells = &c[bi][0];
+#pragma omp simd
             for (candidate_idx_t bj = 0; bj < tile_size; bj++) {
-                votes_count_t& c_cell = c[bi][bj];
+                votes_count_t c_cell = c_cells[bj];
                 votes_count_t smallest = std::min(a[bi][k], b[k][bj]);
                 if constexpr (may_be_diagonal) {
                     std::uint32_t is_not_diagonal_c = (c_row + bi) != (c_col + bj);
@@ -609,10 +611,9 @@ inline void process_tile_openmp_(                 //
                     std::uint32_t is_not_diagonal_b = (b_row + k) != (b_col + bj);
                     std::uint32_t is_bigger = smallest > c_cell;
                     std::uint32_t will_replace = is_not_diagonal_c & is_not_diagonal_a & is_not_diagonal_b & is_bigger;
-                    if (will_replace)
-                        c_cell = smallest;
+                    c_cells[bj] = will_replace ? smallest : c_cell;
                 } else {
-                    c_cell = std::max(c_cell, smallest);
+                    c_cells[bj] = std::max(c_cell, smallest);
                 }
             }
         }
@@ -624,7 +625,7 @@ template <std::uint32_t tile_size, bool check_tail = false>
 void memcpy2d(votes_count_t const* source, candidate_idx_t stride, votes_count_tile<tile_size>& target,
               candidate_idx_t remaining_rows, candidate_idx_t remaining_cols) {
 
-#if defined(SCALING_DEMOCRACY_WITH_NEON)
+#if defined(SCALING_ELECTIONS_WITH_NEON)
     if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size % 4 == 0 && !check_tail) {
         for (candidate_idx_t i = 0; i < tile_size; i++) {
 #pragma unroll full
@@ -650,7 +651,7 @@ template <std::uint32_t tile_size, bool check_tail = false>
 void memcpy2d(votes_count_tile<tile_size> const& source, candidate_idx_t stride, votes_count_t* target,
               candidate_idx_t remaining_rows, candidate_idx_t remaining_cols) {
 
-#if defined(SCALING_DEMOCRACY_WITH_NEON)
+#if defined(SCALING_ELECTIONS_WITH_NEON)
     if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size % 4 == 0 && !check_tail) {
         for (candidate_idx_t i = 0; i < tile_size; i++) {
 #pragma unroll full
@@ -787,7 +788,7 @@ void compute_strongest_paths_openmp(                        //
 #pragma endregion OpenMP
 
 #pragma region Python bindings
-#if !defined(SCALING_DEMOCRACY_TEST)
+#if !defined(SCALING_ELECTIONS_TEST)
 
 /**
  * @brief Computes the strongest paths for the block-parallel Schulze voting algorithm.
@@ -817,7 +818,7 @@ static py::array_t<votes_count_t> compute_strongest_paths(      //
     if (result_row_stride != num_candidates)
         throw std::runtime_error("Result matrix must be contiguous");
 
-#if defined(SCALING_DEMOCRACY_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
 
     if (allow_gpu) {
         votes_count_t* strongest_paths_ptr = nullptr;
@@ -928,7 +929,7 @@ PYBIND11_MODULE(scaling_elections, m) {
 
     // Let's show how to wrap `void` functions for basic logging
     m.def("log_gpus", []() {
-#if defined(SCALING_DEMOCRACY_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
         int device_count;
         cudaDeviceProp device_props;
         cudaError_t error = cudaGetDeviceCount(&device_count);
@@ -951,7 +952,7 @@ PYBIND11_MODULE(scaling_elections, m) {
 
     // This is how we could have used `thrust::` for higher-level operations
     m.def("reduce", [](py::array_t<float> const& data) -> float {
-#if defined(SCALING_DEMOCRACY_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
         py::buffer_info buf = data.request();
         if (buf.ndim != 1 || buf.strides[0] != sizeof(float))
             throw std::runtime_error("Input should be a contiguous 1D float array");
@@ -970,10 +971,10 @@ PYBIND11_MODULE(scaling_elections, m) {
           py::arg("tile_size") = 0);
 }
 
-#endif // !defined(SCALING_DEMOCRACY_TEST)
+#endif // !defined(SCALING_ELECTIONS_TEST)
 #pragma endregion Python bindings
 
-#if defined(SCALING_DEMOCRACY_TEST)
+#if defined(SCALING_ELECTIONS_TEST)
 
 int main() {
 
@@ -988,4 +989,4 @@ int main() {
     return 0;
 }
 
-#endif // defined(SCALING_DEMOCRACY_TEST)
+#endif // defined(SCALING_ELECTIONS_TEST)
