@@ -132,36 +132,81 @@ with open(os.path.join(this_directory, "README.md"), "r", encoding="utf-8") as f
 python_lib_dir = get_python_lib(standard_lib=True)
 python_lib_name = os.path.basename(python_lib_dir).replace(".so", "")
 
-ext_modules = [
-    Extension(
-        "scaling_elections",
-        ["scaling_elections.cu"],
-        include_dirs=[
-            pybind11.get_include(),
-            np.get_include(),
-            get_python_inc(),
-            "/usr/local/cuda/include/",
-        ],
-        library_dirs=[
-            "/usr/local/cuda/lib64",
-            "/usr/lib/x86_64-linux-gnu",
-            "/usr/lib/wsl/lib",
-            python_lib_dir,
-        ],
-        libraries=[
-            "cudart",
-            "cuda",
-            "cublas",
-            "gomp",  # OpenMP
-            python_lib_name.replace(".a", ""),
-        ],
-        extra_link_args=[
-            f"-Wl,-rpath,{python_lib_dir}",
-            "-fopenmp",
-        ],
-        language="c++",
-    ),
-]
+
+# Detect CUDA availability
+def has_cuda():
+    """Check if CUDA is available."""
+    # Check for nvcc
+    if os.system("which nvcc > /dev/null 2>&1") != 0:
+        return False
+    # Check for CUDA headers
+    if not os.path.exists("/usr/local/cuda/include/cuda.h"):
+        return False
+    return True
+
+
+cuda_available = has_cuda()
+
+# Build extension based on CUDA availability
+if cuda_available:
+    print("Building with CUDA support")
+    ext_modules = [
+        Extension(
+            "scaling_elections",
+            ["scaling_elections.cu"],
+            include_dirs=[
+                pybind11.get_include(),
+                np.get_include(),
+                get_python_inc(),
+                "/usr/local/cuda/include/",
+            ],
+            library_dirs=[
+                "/usr/local/cuda/lib64",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib/wsl/lib",
+                python_lib_dir,
+            ],
+            libraries=[
+                "cudart",
+                "cuda",
+                "cublas",
+                "gomp",  # OpenMP
+                python_lib_name.replace(".a", ""),
+            ],
+            extra_link_args=[
+                f"-Wl,-rpath,{python_lib_dir}",
+                "-fopenmp",
+            ],
+            language="c++",
+        ),
+    ]
+else:
+    print("Building CPU-only (OpenMP) - CUDA not available")
+    ext_modules = [
+        Extension(
+            "scaling_elections",
+            ["scaling_elections.cu"],  # Will be compiled as C++ with GCC
+            include_dirs=[
+                pybind11.get_include(),
+                np.get_include(),
+                get_python_inc(),
+            ],
+            library_dirs=[
+                "/usr/lib/x86_64-linux-gnu",
+                python_lib_dir,
+            ],
+            libraries=[
+                "gomp",  # OpenMP
+                python_lib_name.replace(".a", ""),
+            ],
+            extra_link_args=[
+                f"-Wl,-rpath,{python_lib_dir}",
+                "-fopenmp",
+            ],
+            language="c++",
+        ),
+    ]
+
 
 setup(
     name="ScalingElections",

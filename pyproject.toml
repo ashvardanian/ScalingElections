@@ -15,4 +15,5 @@ requires = ["setuptools>=65.5.1", "wheel", "pybind11", "numpy>=1.26,<2.0"]
 build-backend = "setuptools.build_meta"
 
 [project.optional-dependencies]
-dev = ["numba", "cupy-cuda12x", "pycuda>=2025.1.2", "pytest"]
+cpu = ["numba", "pytest"]
+gpu = ["cupy-cuda12x", "pycuda>=2025.1.2"]

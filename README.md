@@ -38,7 +38,7 @@ Build the environment and run with `uv`:
 
 ```sh
 uv venv -p python3.12               # Pick a recent Python version
-uv sync --extra dev                 # Build locally and install dependencies
+uv sync --extra cpu --extra gpu     # Build locally and install dependencies
 uv run scaling_elections.py         # Run the default problem size
 uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 ```
