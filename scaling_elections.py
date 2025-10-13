@@ -10,13 +10,13 @@ Usage:
     uv run scaling_elections.py
     uv run scaling_elections.py --help
     uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
-    
-For proper benchmarking with large input sizes:
-    uv run scaling_elections.py --num-candidates 2048 --num-voters 2048 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 20
-    uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 10
-    uv run scaling_elections.py --num-candidates 8192 --num-voters 8192 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 5
-    uv run scaling_elections.py --num-candidates 16384 --num-voters 16384 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
-    uv run scaling_elections.py --num-candidates 32768 --num-voters 32768 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
+
+For proper benchmarking with large random-generated preference matrices:
+    uv run scaling_elections.py --num-candidates 2048 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 20
+    uv run scaling_elections.py --num-candidates 4096 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 10
+    uv run scaling_elections.py --num-candidates 8192 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 5
+    uv run scaling_elections.py --num-candidates 16384 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 3
+    uv run scaling_elections.py --num-candidates 32768 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 1
 
 See: https://github.com/ashvardanian/ScalingElections
 """

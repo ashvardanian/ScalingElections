@@ -77,37 +77,13 @@ pixi run mojo build scaling_elections.mojo -o schulze
 
 ## Throughput
 
-A typical benchmark output comparing serial Numba code to 16 Intel Ice Lake cores to SXM Nvidia H100 GPU would be:
-
-```sh
-> Generating 4,096 random voter rankings with 4,096 candidates
-> Generated voter rankings, proceeding with 16 threads
-> Numba: 11.2169 secs, 6,126,425,774.83 cells^3/sec
-> CUDA: 0.3146 secs, 218,437,101,103.83 cells^3/sec
-> CUDA with TMA: 0.2969 secs, 231,448,250,952.52 cells^3/sec
-> OpenMP: 24.7729 secs, 2,773,975,923.94 cells^3/sec
-> Serial: 58.8089 secs, 1,168,522,106.72 cells^3/sec
-```
-
-CUDA outperforms the baseline JIT-compiled parallel kernel by a factor of __37.78x__.
-
----
-
-40 core CPU uses ~270 Watts, so 10 cores use ~67.5 Watts.
-Our SXM Nvidia H100 has a ~700 Watt TDP, but consumes only 360 under such load, so 5x more power-hungry, meaning the CUDA implementation is up to 7x more power-efficient than Numba on that Intel CPU.
-As the matrix grows, the GPU utilization improves and the experimentally observed throughput fits a sub-cubic curve.
-Comparing to Arm-based CPUs and native SIMD-accelerated code would be more fair.
-Repeating the experiment with 192-core AWS Graviton 4 chips, the timings with tile-size 32 are:
-
-| Candidates | Numba on `c8g` | OpenMP on `c8g` | OpenMP + NEON on `c8g` | CUDA on `h100` | Mojo on `h100` |
-| :--------- | -------------: | --------------: | ---------------------: | -------------: | -------------: |
-| 2'048      |         1.14 s |          0.35 s |                 0.16 s |                |                |
-| 4'096      |         1.84 s |          1.02 s |                 0.35 s |                |                |
-| 8'192      |         7.49 s |          5.50 s |                 4.64 s |         1.98 s |                |
-| 16'384     |        38.04 s |         24.67 s |                24.20 s |         9.53 s |                |
-| 32'768     |       302.85 s |        246.85 s |               179.82 s |        42.90 s |                |
-
-Comparing the numbers, we are still looking at a roughly 4x speedup of CUDA for the largest matrix size tested for a comparable power consumption and hardware rental cost.
+| Candidates | Numba, `384vCPU` | Mojo, `384vCPU` |    CUDA, `h100` |    Mojo, `h100` |
+| :--------- | ---------------: | --------------: | --------------: | --------------: |
+| 2'048      |   34.4 Gcells³/s |  48.5 Gcells³/s | 182.7 Gcells³/s | 153.4 Gcells³/s |
+| 4'096      |   86.8 Gcells³/s |  50.3 Gcells³/s | 264.1 Gcells³/s | 232.6 Gcells³/s |
+| 8'192      |   74.6 Gcells³/s |  71.6 Gcells³/s | 495.3 Gcells³/s | 408.0 Gcells³/s |
+| 16'384     |   76.7 Gcells³/s |  78.5 Gcells³/s | 600.7 Gcells³/s | 635.3 Gcells³/s |
+| 32'768     |  101.4 Gcells³/s |  82.3 Gcells³/s | 921.4 Gcells³/s | 893.7 Gcells³/s |
 
 ---
 

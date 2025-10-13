@@ -15,14 +15,14 @@ pixi run mojo scaling_elections.mojo
 pixi run mojo scaling_elections.mojo --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 ```
 
-For proper benchmarking with large input sizes:
+For proper benchmarking with large random-generated preference matrices:
 
 ```bash
-pixi run mojo scaling_elections.mojo --num-candidates 2048 --num-voters 2048 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 20
-pixi run mojo scaling_elections.mojo --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 10
-pixi run mojo scaling_elections.mojo --num-candidates 8192 --num-voters 8192 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 5
-pixi run mojo scaling_elections.mojo --num-candidates 16384 --num-voters 16384 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
-pixi run mojo scaling_elections.mojo --num-candidates 32768 --num-voters 32768 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
+pixi run mojo scaling_elections.mojo --num-candidates 2048 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 20
+pixi run mojo scaling_elections.mojo --num-candidates 4096 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 10
+pixi run mojo scaling_elections.mojo --num-candidates 8192 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 5
+pixi run mojo scaling_elections.mojo --num-candidates 16384 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 3
+pixi run mojo scaling_elections.mojo --num-candidates 32768 --num-voters 0 --run-gpu --no-serial --warmup 1 --repeat 1
 ```
 
 Or compile and run:
