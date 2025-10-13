@@ -7,7 +7,17 @@ matrices from voter rankings and computing strongest paths using the Floyd-Warsh
 algorithm with block-parallel optimizations.
 
 Usage:
+    uv run scaling_elections.py
+    uv run scaling_elections.py --help
     uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
+    
+For proper benchmarking with large input sizes:
+
+    uv run scaling_elections.py --num-candidates 2048 --num-voters 2048 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 20
+    uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 10
+    uv run scaling_elections.py --num-candidates 8192 --num-voters 8192 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 5
+    uv run scaling_elections.py --num-candidates 16384 --num-voters 16384 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
+    uv run scaling_elections.py --num-candidates 32768 --num-voters 32768 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
 
 See: https://github.com/ashvardanian/ScalingElections
 """
@@ -352,6 +362,18 @@ if __name__ == "__main__":
         default=32,
         help="GPU tile size for tiling optimization",
     )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=1,
+        help="Number of warmup iterations (default: 1)",
+    )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Number of benchmark iterations (default: 1)",
+    )
     args = parser.parse_args()
 
     cpu_tile_size = args.cpu_tile_size
@@ -403,6 +425,7 @@ if __name__ == "__main__":
     if args.run_gpu:
         print(f"  GPU tile: {gpu_tile_size} × {gpu_tile_size}")
     print(f"  CPU threads: {get_num_threads()}")
+    print(f"  Warmup: {args.warmup}, Repeat: {args.repeat}")
     print()
 
     # Generate random voter rankings
@@ -430,16 +453,30 @@ if __name__ == "__main__":
     if run_serial:
         print("→ Serial (Numba)")
         try:
-            start_time = time.time()
-            sub_serial_result = compute_strongest_paths_numba_serial(sub_preferences)
-            elapsed_time = time.time() - start_time
-            print(f"  Warm-up: {format_time(elapsed_time)}")
+            # Warmup iterations
+            for i in range(args.warmup):
+                start_time = time.time()
+                sub_serial_result = compute_strongest_paths_numba_serial(sub_preferences)
+                elapsed_time = time.time() - start_time
+                if args.warmup > 1:
+                    print(f"  Warm-up {i+1}/{args.warmup}: {format_time(elapsed_time)}")
+                else:
+                    print(f"  Warm-up: {format_time(elapsed_time)}")
 
-            start_time = time.time()
-            serial_result = compute_strongest_paths_numba_serial(preferences)
-            elapsed_time = time.time() - start_time
-            throughput = num_candidates**3 / elapsed_time
-            print(f"  Run:     {format_time(elapsed_time)} │ {format_throughput(throughput)}")
+            # Benchmark iterations
+            times = []
+            for i in range(args.repeat):
+                start_time = time.time()
+                serial_result = compute_strongest_paths_numba_serial(preferences)
+                elapsed_time = time.time() - start_time
+                times.append(elapsed_time)
+
+            avg_time = sum(times) / len(times)
+            throughput = num_candidates**3 / avg_time
+            if args.repeat > 1:
+                print(f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}")
+            else:
+                print(f"  Run:     {format_time(avg_time)} │ {format_throughput(throughput)}")
         except Exception as e:
             print(f"  ✗ Benchmark failed: {e}")
 
@@ -457,24 +494,36 @@ if __name__ == "__main__":
 
         print(f"→ {name}")
 
-        # Warm-up run
+        # Warmup iterations
         try:
-            start_time = time.time()
-            sub_result = callback(sub_preferences)
-            elapsed_time = time.time() - start_time
-            print(f"  Warm-up: {format_time(elapsed_time)}")
+            for i in range(args.warmup):
+                start_time = time.time()
+                sub_result = callback(sub_preferences)
+                elapsed_time = time.time() - start_time
+                if args.warmup > 1:
+                    print(f"  Warm-up {i+1}/{args.warmup}: {format_time(elapsed_time)}")
+                else:
+                    print(f"  Warm-up: {format_time(elapsed_time)}")
         except Exception as e:
             print(f"  ✗ Warm-up failed: {e}")
             print()
             continue
 
-        # Main benchmark run
+        # Benchmark iterations
         try:
-            start_time = time.time()
-            result = callback(preferences)
-            elapsed_time = time.time() - start_time
-            throughput = num_candidates**3 / elapsed_time
-            print(f"  Run:     {format_time(elapsed_time)} │ {format_throughput(throughput)}")
+            times = []
+            for i in range(args.repeat):
+                start_time = time.time()
+                result = callback(preferences)
+                elapsed_time = time.time() - start_time
+                times.append(elapsed_time)
+
+            avg_time = sum(times) / len(times)
+            throughput = num_candidates**3 / avg_time
+            if args.repeat > 1:
+                print(f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}")
+            else:
+                print(f"  Run:     {format_time(avg_time)} │ {format_throughput(throughput)}")
 
             # Validate against serial baseline if available
             if serial_result is not None:
