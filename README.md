@@ -2,9 +2,14 @@
 
 ![Scaling Elections Thumbnail](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/scaling-democracy.jpg?raw=true)
 
-This repository implements the Schulze voting algorithm using CUDA for hardware acceleration.
-That algorithm is often used by Pirate Parties and open-source foundations, and it's a good example of a combinatorial problem that can be parallelized efficiently on GPUs.
-It's built as a single `scaling_elections.cu` CUDA file, wrapped with PyBind11, and compiled __without__ CMake directly from the `setup.py`.
+This repository implements tiled parallel adaptations of the Schulze voting algorithm with hardware acceleration across CPUs and GPUs in Mojo and CUDA C++ wrapped into Python.
+That algorithm is often used by Pirate Parties and open-source foundations, and it's a good example of a combinatorial problem that can be parallelized by changing evaluation order.
+
+- The Mojo implementation is packed into a single file `scaling_elections.mojo`, containing both CPU and GPU implementations, and the benchmarking code.
+- The other implementation is a sandwich of `scaling_elections.cu` CUDA C++ code wrapped with PyBind11, and `scaling_elections.py` packing the Python benchmarking code and Numba reference kernels.
+
+Not a single line of CMake is used in this repository!
+The entire native library build is packed into `setup.py` for Python, and `pixi` takes care of the Mojo build.
 
 ## Usage
 

@@ -12,7 +12,6 @@ Usage:
     uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
     
 For proper benchmarking with large input sizes:
-
     uv run scaling_elections.py --num-candidates 2048 --num-voters 2048 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 20
     uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 10
     uv run scaling_elections.py --num-candidates 8192 --num-voters 8192 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 5
@@ -317,6 +316,41 @@ def format_throughput(cells_per_sec: float) -> str:
         return f"{cells_per_sec / 1e3:.1f} Kcells³/s"
 
 
+def benchmark_implementation(callback, preferences: np.ndarray, warmup: int, repeat: int):
+    """Run warmup and benchmark iterations, returning (avg_time, result, success).
+
+    Args:
+        callback: Function to benchmark
+        preferences: Input preference matrix
+        warmup: Number of warmup iterations
+        repeat: Number of benchmark iterations
+
+    Returns:
+        Tuple of (avg_time, result, success) where success is True if all iterations passed
+    """
+    # Warmup iterations on full dataset (important for JIT/GPU tuning)
+    for i in range(warmup):
+        start_time = time.time()
+        _ = callback(preferences)
+        elapsed_time = time.time() - start_time
+        if warmup > 1:
+            print(f"  Warm-up {i+1}/{warmup}: {format_time(elapsed_time)}")
+        else:
+            print(f"  Warm-up: {format_time(elapsed_time)}")
+
+    # Benchmark iterations
+    times = []
+    result = None
+    for i in range(repeat):
+        start_time = time.time()
+        result = callback(preferences)
+        elapsed_time = time.time() - start_time
+        times.append(elapsed_time)
+
+    avg_time = sum(times) / len(times)
+    return avg_time, result, True
+
+
 # Benchmark and comparison code remains the same
 if __name__ == "__main__":
     import time
@@ -440,9 +474,6 @@ if __name__ == "__main__":
         ]
         preferences = build_pairwise_preferences(voter_rankings)
 
-    # Warm-up: run all functions on tiny inputs first to avoid JIT costs
-    sub_preferences = preferences[: num_candidates // 8, : num_candidates // 8]
-
     # Benchmarking section
     print()
     print("─── Benchmarking ───────────────────────────────────")
@@ -453,25 +484,9 @@ if __name__ == "__main__":
     if run_serial:
         print("→ Serial (Numba)")
         try:
-            # Warmup iterations
-            for i in range(args.warmup):
-                start_time = time.time()
-                sub_serial_result = compute_strongest_paths_numba_serial(sub_preferences)
-                elapsed_time = time.time() - start_time
-                if args.warmup > 1:
-                    print(f"  Warm-up {i+1}/{args.warmup}: {format_time(elapsed_time)}")
-                else:
-                    print(f"  Warm-up: {format_time(elapsed_time)}")
-
-            # Benchmark iterations
-            times = []
-            for i in range(args.repeat):
-                start_time = time.time()
-                serial_result = compute_strongest_paths_numba_serial(preferences)
-                elapsed_time = time.time() - start_time
-                times.append(elapsed_time)
-
-            avg_time = sum(times) / len(times)
+            avg_time, serial_result, _ = benchmark_implementation(
+                compute_strongest_paths_numba_serial, preferences, args.warmup, args.repeat
+            )
             throughput = num_candidates**3 / avg_time
             if args.repeat > 1:
                 print(f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}")
@@ -479,7 +494,6 @@ if __name__ == "__main__":
                 print(f"  Run:     {format_time(avg_time)} │ {format_throughput(throughput)}")
         except Exception as e:
             print(f"  ✗ Benchmark failed: {e}")
-
         print()
 
     # Run other implementations and validate against serial
@@ -493,32 +507,8 @@ if __name__ == "__main__":
             continue
 
         print(f"→ {name}")
-
-        # Warmup iterations
         try:
-            for i in range(args.warmup):
-                start_time = time.time()
-                sub_result = callback(sub_preferences)
-                elapsed_time = time.time() - start_time
-                if args.warmup > 1:
-                    print(f"  Warm-up {i+1}/{args.warmup}: {format_time(elapsed_time)}")
-                else:
-                    print(f"  Warm-up: {format_time(elapsed_time)}")
-        except Exception as e:
-            print(f"  ✗ Warm-up failed: {e}")
-            print()
-            continue
-
-        # Benchmark iterations
-        try:
-            times = []
-            for i in range(args.repeat):
-                start_time = time.time()
-                result = callback(preferences)
-                elapsed_time = time.time() - start_time
-                times.append(elapsed_time)
-
-            avg_time = sum(times) / len(times)
+            avg_time, result, _ = benchmark_implementation(callback, preferences, args.warmup, args.repeat)
             throughput = num_candidates**3 / avg_time
             if args.repeat > 1:
                 print(f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}")
@@ -533,15 +523,14 @@ if __name__ == "__main__":
                     print(f"  ✗ Results don't match baseline!")
         except Exception as e:
             print(f"  ✗ Benchmark failed: {e}")
-
         print()
 
-    # Determine the winner and ranking (use serial if available, otherwise first result)
+    # Determine the winner and ranking (use serial if available, otherwise compute)
     if serial_result is not None:
         result_for_winner = serial_result
     else:
-        # Use a small sample for winner determination
-        result_for_winner = compute_strongest_paths_numba_serial(sub_preferences)
+        # Compute a result for winner determination if no serial was run
+        result_for_winner = compute_strongest_paths_numba_serial(preferences)
 
     candidates = list(range(result_for_winner.shape[0]))
     winner, ranking = get_winner_and_ranking(candidates, result_for_winner)

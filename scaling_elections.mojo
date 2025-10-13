@@ -15,6 +15,16 @@ pixi run mojo scaling_elections.mojo
 pixi run mojo scaling_elections.mojo --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 ```
 
+For proper benchmarking with large input sizes:
+
+```bash
+pixi run mojo scaling_elections.mojo --num-candidates 2048 --num-voters 2048 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 20
+pixi run mojo scaling_elections.mojo --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 10
+pixi run mojo scaling_elections.mojo --num-candidates 8192 --num-voters 8192 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 5
+pixi run mojo scaling_elections.mojo --num-candidates 16384 --num-voters 16384 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
+pixi run mojo scaling_elections.mojo --num-candidates 32768 --num-voters 32768 --run-cpu --run-gpu --no-serial --warmup 1 --repeat 3
+```
+
 Or compile and run:
 
 ```bash
@@ -508,34 +518,41 @@ fn generate_random_preferences(num_candidates: Int, num_voters: Int) -> Preferen
 
     return preferences^
 
-fn benchmark_implementation(
-    name: String,
+fn run_warmup(
     implementation: fn(PreferenceMatrix) raises -> StrongestPathsMatrix,
     preferences: PreferenceMatrix,
-    warmup: Bool = False
-) raises -> StrongestPathsMatrix:
-    """
-    Benchmark a specific implementation with optional warm-up.
+    warmup: Int
+) raises:
+    """Run warmup iterations and print timing."""
+    for i in range(warmup):
+        var start_time = perf_counter_ns()
+        _ = implementation(preferences)
+        var elapsed_ns = perf_counter_ns() - start_time
+        if warmup > 1:
+            print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
+        else:
+            print("  Warm-up: " + format_time(elapsed_ns))
 
-    Args:
-        name: Name of the implementation.
-        implementation: Function to benchmark.
-        preferences: Input preferences matrix.
-        warmup: If True, print as warm-up run; otherwise as benchmark.
+fn run_and_average(
+    implementation: fn(PreferenceMatrix) raises -> StrongestPathsMatrix,
+    preferences: PreferenceMatrix,
+    repeat: Int,
+    mut result: StrongestPathsMatrix
+) raises -> Int:
+    """Run benchmark iterations and return avg_time_ns, storing result in mutable parameter."""
+    var times = List[Int]()
+    for _ in range(repeat):
+        var start_time = perf_counter_ns()
+        result = implementation(preferences)
+        var elapsed_ns = perf_counter_ns() - start_time
+        times.append(elapsed_ns)
 
-    Returns:
-        Result of the computation.
-    """
-    var start_time = perf_counter_ns()
-    var result = implementation(preferences)
-    var end_time = perf_counter_ns()
-    var elapsed_ns = end_time - start_time
-
-    if warmup:
-        print("  Warm-up: " + format_time(elapsed_ns))
-    else:
-        print("  Run:     " + format_time(elapsed_ns) + " │ " + format_throughput_from_ns(elapsed_ns, preferences.num_candidates))
-    return result^
+    # Calculate average time
+    var total_time: Int = 0
+    for i in range(len(times)):
+        total_time += times[i]
+    var avg_time = total_time // repeat
+    return avg_time
 
 fn format_time(elapsed_ns: Int) -> String:
     """Format time with appropriate unit (ms or s)."""
@@ -1061,32 +1078,9 @@ fn main():
     if run_serial:
         try:
             print("→ Serial (Mojo)")
+            run_warmup(compute_strongest_paths_serial, preferences, warmup)
 
-            # Warmup iterations
-            for i in range(warmup):
-                var start_time = perf_counter_ns()
-                _ = compute_strongest_paths_serial(preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                if warmup > 1:
-                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
-                else:
-                    print("  Warm-up: " + format_time(elapsed_ns))
-
-            # Benchmark iterations
-            var times = List[Int]()
-            for i in range(repeat):
-                var start_time = perf_counter_ns()
-                var serial_result = compute_strongest_paths_serial(preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                times.append(elapsed_ns)
-                if i == repeat - 1:
-                    baseline = serial_result^
-
-            # Calculate average time
-            var total_time: Int = 0
-            for i in range(len(times)):
-                total_time += times[i]
-            var avg_time = total_time // repeat
+            var avg_time = run_and_average(compute_strongest_paths_serial, preferences, repeat, baseline)
 
             if repeat > 1:
                 print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
@@ -1107,48 +1101,26 @@ fn main():
     if run_cpu:
         try:
             print("→ Tiled CPU (Mojo)")
+            run_warmup(compute_strongest_paths_tiled_cpu, preferences, warmup)
 
-            # Warmup iterations
-            for i in range(warmup):
-                var start_time = perf_counter_ns()
-                _ = compute_strongest_paths_tiled_cpu(preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                if warmup > 1:
-                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
-                else:
-                    print("  Warm-up: " + format_time(elapsed_ns))
-
-            # Benchmark iterations
-            var times = List[Int]()
-            for i in range(repeat):
-                var start_time = perf_counter_ns()
-                var cpu_result = compute_strongest_paths_tiled_cpu(preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                times.append(elapsed_ns)
-
-                # Validate and store winner on last iteration
-                if i == repeat - 1:
-                    if has_baseline and validate_results(cpu_result, baseline):
-                        print("  ✓ Results validated")
-                    elif has_baseline:
-                        print("  ✗ Results don't match baseline!")
-
-                    if not has_winner:
-                        var result_tuple = compute_winner(num_candidates, cpu_result)
-                        winner = result_tuple[0]
-                        ranking = result_tuple[1].copy()
-                        has_winner = True
-
-            # Calculate average time
-            var total_time: Int = 0
-            for i in range(len(times)):
-                total_time += times[i]
-            var avg_time = total_time // repeat
+            var cpu_result = StrongestPathsMatrix(0)
+            var avg_time = run_and_average(compute_strongest_paths_tiled_cpu, preferences, repeat, cpu_result)
 
             if repeat > 1:
                 print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
             else:
                 print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
+
+            if has_baseline and validate_results(cpu_result, baseline):
+                print("  ✓ Results validated")
+            elif has_baseline:
+                print("  ✗ Results don't match baseline!")
+
+            if not has_winner:
+                var result_tuple = compute_winner(num_candidates, cpu_result)
+                winner = result_tuple[0]
+                ranking = result_tuple[1].copy()
+                has_winner = True
 
             print()
         except e:
@@ -1159,48 +1131,26 @@ fn main():
     if run_gpu:
         try:
             print("→ Tiled GPU (Mojo)")
+            run_warmup(compute_strongest_paths_gpu_wrapper, preferences, warmup)
 
-            # Warmup iterations
-            for i in range(warmup):
-                var start_time = perf_counter_ns()
-                _ = compute_strongest_paths_gpu_wrapper(preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                if warmup > 1:
-                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
-                else:
-                    print("  Warm-up: " + format_time(elapsed_ns))
-
-            # Benchmark iterations
-            var times = List[Int]()
-            for i in range(repeat):
-                var start_time = perf_counter_ns()
-                var gpu_result = compute_strongest_paths_gpu_wrapper(preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                times.append(elapsed_ns)
-
-                # Validate and store winner on last iteration
-                if i == repeat - 1:
-                    if has_baseline and validate_results(gpu_result, baseline):
-                        print("  ✓ Results validated")
-                    elif has_baseline:
-                        print("  ✗ Results don't match baseline!")
-
-                    if not has_winner:
-                        var result_tuple = compute_winner(num_candidates, gpu_result)
-                        winner = result_tuple[0]
-                        ranking = result_tuple[1].copy()
-                        has_winner = True
-
-            # Calculate average time
-            var total_time: Int = 0
-            for i in range(len(times)):
-                total_time += times[i]
-            var avg_time = total_time // repeat
+            var gpu_result = StrongestPathsMatrix(0)
+            var avg_time = run_and_average(compute_strongest_paths_gpu_wrapper, preferences, repeat, gpu_result)
 
             if repeat > 1:
                 print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
             else:
                 print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
+
+            if has_baseline and validate_results(gpu_result, baseline):
+                print("  ✓ Results validated")
+            elif has_baseline:
+                print("  ✗ Results don't match baseline!")
+
+            if not has_winner:
+                var result_tuple = compute_winner(num_candidates, gpu_result)
+                winner = result_tuple[0]
+                ranking = result_tuple[1].copy()
+                has_winner = True
 
             print()
         except e:
