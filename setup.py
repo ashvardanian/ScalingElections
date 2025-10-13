@@ -54,20 +54,32 @@ class BuildExt(build_ext):
     def build_gcc_extension(self, ext):
         # Compile all source files with GCC, including treating .cu files as .cpp files
         objects = []
+        # Aggressive optimization flags for CPU performance
+        opt_flags = [
+            "-fPIC",
+            "-fopenmp",
+            "-O3",  # Maximum optimization
+            "-ffast-math",  # Aggressive floating-point optimizations
+            "-march=native",  # Use all available CPU instructions (AVX, AVX2, AVX-512, etc.)
+            "-mtune=native",  # Tune for the specific CPU
+            "-funroll-loops",  # Loop unrolling
+            "-ftree-vectorize",  # Enable vectorization
+            "-fopt-info-vec-optimized",  # Report successful vectorizations
+        ]
         for source in ext.sources:
             if source.endswith(".cu"):
                 obj = self.compiler.compile(
                     [source],
                     output_dir=self.build_temp,
                     extra_preargs=["-x", "c++"],
-                    extra_postargs=["-fPIC", "-fopenmp"],
+                    extra_postargs=opt_flags,
                     include_dirs=ext.include_dirs,
                 )
             else:
                 obj = self.compiler.compile(
                     [source],
                     output_dir=self.build_temp,
-                    extra_postargs=["-fPIC", "-fopenmp"],
+                    extra_postargs=opt_flags,
                     include_dirs=ext.include_dirs,
                 )
             objects.extend(obj)
