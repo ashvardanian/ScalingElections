@@ -7,10 +7,9 @@ matrices from voter rankings and computing strongest paths using the Floyd-Warsh
 algorithm with block-parallel optimizations.
 
 Usage:
-    uv run benchmark.py --num-candidates 4096 --num-voters 4096 --tile-size 32 \
-        --run-openmp --run-numba --run-serial --run-cuda
+    uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 
-See: https://github.com/ashvardanian/ScalingDemocracy
+See: https://github.com/ashvardanian/ScalingElections
 """
 from typing import Sequence, Tuple, List
 import warnings
@@ -18,8 +17,8 @@ import warnings
 import numpy as np
 from numba import njit, prange, get_num_threads
 
-from scaling_democracy import log_gpus  # type: ignore
-from scaling_democracy import compute_strongest_paths  # type: ignore
+from scaling_elections import log_gpus  # type: ignore
+from scaling_elections import compute_strongest_paths  # type: ignore
 
 # Suppress Numba TBB threading layer warnings
 warnings.filterwarnings("ignore", message=".*TBB threading layer.*")
@@ -367,6 +366,12 @@ if __name__ == "__main__":
         allow_tma=False,
         tile_size=gpu_tile_size,
     )
+    compute_strongest_paths_hopper = lambda x: compute_strongest_paths(
+        x,
+        allow_gpu=True,
+        allow_tma=True,
+        tile_size=gpu_tile_size,
+    )
     compute_strongest_paths_openmp = lambda x: compute_strongest_paths(
         x,
         allow_gpu=False,
@@ -445,6 +450,7 @@ if __name__ == "__main__":
         ("Tiled CPU (Numba)", args.run_cpu, compute_strongest_paths_numba_tiled),
         ("Tiled CPU (C++ with OpenMP)", args.run_cpu, compute_strongest_paths_openmp),
         ("Tiled GPU (CUDA)", args.run_gpu, compute_strongest_paths_cuda),
+        ("Tiled GPU (CUDA + TMA)", args.run_gpu, compute_strongest_paths_hopper),
     ]:
         if not wanted:
             continue

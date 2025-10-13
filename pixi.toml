@@ -1,5 +1,5 @@
 [project]
-name = "ScalingDemocracy"
+name = "ScalingElections"
 channels = ["conda-forge", "https://conda.modular.com/max"]
 platforms = ["linux-64"]
 description = "GPU-accelerated Schulze voting algorithm in Mojo 🔥"

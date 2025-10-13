@@ -42,7 +42,7 @@ class BuildExt(build_ext):
 
         # Link all object files
         self.compiler.link_shared_object(
-            objects + [os.path.join(self.build_temp, "scaling_democracy.o")],
+            objects + [os.path.join(self.build_temp, "scaling_elections.o")],
             self.get_ext_fullpath(ext.name),
             libraries=ext.libraries,
             library_dirs=ext.library_dirs,
@@ -90,7 +90,7 @@ class BuildExt(build_ext):
         os.makedirs(output_dir, exist_ok=True)
         include_dirs = self.compiler.include_dirs + ext.include_dirs
         include_dirs = " ".join(f"-I{dir}" for dir in include_dirs)
-        output_file = os.path.join(output_dir, "scaling_democracy.o")
+        output_file = os.path.join(output_dir, "scaling_elections.o")
 
         # Let's try inferring the compute capability from the GPU
         # Kepler: -arch=sm_30
@@ -134,8 +134,8 @@ python_lib_name = os.path.basename(python_lib_dir).replace(".so", "")
 
 ext_modules = [
     Extension(
-        "scaling_democracy",
-        ["scaling_democracy.cu"],
+        "scaling_elections",
+        ["scaling_elections.cu"],
         include_dirs=[
             pybind11.get_include(),
             np.get_include(),
@@ -164,11 +164,11 @@ ext_modules = [
 ]
 
 setup(
-    name="ScalingDemocracy",
+    name="ScalingElections",
     version=__version__,
     author="Ash Vardanian",
     author_email="1983160+ashvardanian@users.noreply.github.com",
-    url="https://github.com/ashvardanian/ScalingDemocracy",
+    url="https://github.com/ashvardanian/ScalingElections",
     description="GPU-accelerated Schulze voting algorithm",
     long_description=long_description,
     ext_modules=ext_modules,

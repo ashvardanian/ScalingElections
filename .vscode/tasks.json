@@ -1,57 +1,53 @@
 {
-    "version": "2.0.0",
-    "tasks": [
-        {
-            "label": "Compile with NVCC",
-            "type": "shell",
-            "command": "/usr/local/cuda/bin/nvcc",
-            "args": [
-                "-o",
-                "${workspaceFolder}/build_debug/scaling_democracy",
-                "${workspaceFolder}/scaling_democracy.cu",
-                "-Xcompiler",
-                "-fopenmp",
-                "-fsanitize=address",
-                "-fsanitize=undefined",
-                "-g",
-                "-O0",
-                "--std=c++17"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": [
-                "$gcc"
-            ],
-            "detail": "Compiles the code using NVCC"
-        },
-        {
-            "label": "Compile with GCC",
-            "type": "shell",
-            "command": "g++",
-            "args": [
-                "-o",
-                "${workspaceFolder}/build_debug/scaling_democracy",
-                "-x",
-                "c++",
-                "${workspaceFolder}/scaling_democracy.cu",
-                "-fopenmp",
-                "-fsanitize=address",
-                "-fsanitize=undefined",
-                "-g",
-                "-O0",
-                "--std=c++17",
-                "-DSCALING_DEMOCRACY_TEST"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
-            "problemMatcher": [
-                "$gcc"
-            ],
-            "detail": "Compiles the code using GCC"
-        }
-    ]
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Compile with NVCC",
+      "type": "shell",
+      "command": "/usr/local/cuda/bin/nvcc",
+      "args": [
+        "-o",
+        "${workspaceFolder}/build_debug/scaling_elections",
+        "${workspaceFolder}/scaling_elections.cu",
+        "-Xcompiler",
+        "-fopenmp",
+        "-fsanitize=address",
+        "-fsanitize=undefined",
+        "-g",
+        "-O0",
+        "--std=c++17"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"],
+      "detail": "Compiles the code using NVCC"
+    },
+    {
+      "label": "Compile with GCC",
+      "type": "shell",
+      "command": "g++",
+      "args": [
+        "-o",
+        "${workspaceFolder}/build_debug/scaling_elections",
+        "-x",
+        "c++",
+        "${workspaceFolder}/scaling_elections.cu",
+        "-fopenmp",
+        "-fsanitize=address",
+        "-fsanitize=undefined",
+        "-g",
+        "-O0",
+        "--std=c++17",
+        "-DSCALING_DEMOCRACY_TEST"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"],
+      "detail": "Compiles the code using GCC"
+    }
+  ]
 }

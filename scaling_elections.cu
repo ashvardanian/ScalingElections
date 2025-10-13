@@ -1,9 +1,9 @@
 /**
  * @brief  CUDA-accelerated Schulze voting algorithm implementation.
- * @file   scaling_democracy.cu
+ * @file   scaling_elections.cu
  * @author Ash Vardanian
  * @date   July 12, 2024
- * @see    https://ashvardanian.com/ScalingDemocracy
+ * @see    https://ashvardanian.com/ScalingElections
  */
 #include <algorithm> // `std::min`, `std::max`
 #include <csignal>   // `std::signal`
@@ -922,7 +922,7 @@ static py::array_t<votes_count_t> compute_strongest_paths(      //
     return result;
 }
 
-PYBIND11_MODULE(scaling_democracy, m) {
+PYBIND11_MODULE(scaling_elections, m) {
 
     std::signal(SIGINT, signal_handler);
 

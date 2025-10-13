@@ -1,10 +1,10 @@
-# Scaling Democracy with GPUs
+# Scaling Elections with GPUs
 
-![Scaling Democracy Thumbnail](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/scaling-democracy.jpg?raw=true)
+![Scaling Elections Thumbnail](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/scaling-democracy.jpg?raw=true)
 
 This repository implements the Schulze voting algorithm using CUDA for hardware acceleration.
 That algorithm is often used by Pirate Parties and open-source foundations, and it's a good example of a combinatorial problem that can be parallelized efficiently on GPUs.
-It's built as a single `scaling_democracy.cu` CUDA file, wrapped with PyBind11, and compiled __without__ CMake directly from the `setup.py`.
+It's built as a single `scaling_elections.cu` CUDA file, wrapped with PyBind11, and compiled __without__ CMake directly from the `setup.py`.
 
 ## Usage
 
@@ -25,8 +25,8 @@ Both support the same CLI arguments:
 Pull:
 
 ```sh
-git clone https://github.com/ashvardanian/ScalingDemocracy.git
-cd ScalingDemocracy
+git clone https://github.com/ashvardanian/ScalingElections.git
+cd ScalingElections
 ```
 
 Build the environment and run with `uv`:
@@ -34,32 +34,32 @@ Build the environment and run with `uv`:
 ```sh
 uv venv -p python3.12               # Pick a recent Python version
 uv sync --extra dev                 # Build locally and install dependencies
-uv run benchmark.py                 # Run the default problem size
-uv run benchmark.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
+uv run scaling_elections.py         # Run the default problem size
+uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 ```
 
 Alternatively, with your local environment:
 
 ```sh
 pip install -e . --force-reinstall  # Build locally and install dependencies
-python benchmark.py                 # Run the default problem size
+python scaling_elections.py         # Run the default problem size
 ```
 
 ### Mojo
 
-This repository also includes a pure Mojo implementation in `scaling_democracy.mojo`.
+This repository also includes a pure Mojo implementation in `scaling_elections.mojo`.
 To install and run it, use `pixi`:
 
 ```sh
 pixi install
-pixi run mojo scaling_democracy.mojo --help
-pixi run mojo scaling_democracy.mojo --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
+pixi run mojo scaling_elections.mojo --help
+pixi run mojo scaling_elections.mojo --num-candidates 4096 --num-voters 4096 --run-cpu --run-gpu
 ```
 
 Or compile and run as a standalone binary:
 
 ```sh
-pixi run mojo build scaling_democracy.mojo -o schulze
+pixi run mojo build scaling_elections.mojo -o schulze
 ./schulze --num-candidates 4096 --run-cpu --run-gpu
 ```
 
@@ -109,7 +109,7 @@ Comparing the numbers, we are still looking at a roughly 4x speedup of CUDA for 
 With NVIDIA Nsight Compute CLI we can dissect the kernels and see that there is more room for improvement:
 
 ```sh
-ncu uv run benchmark.py --num-candidates 4096 --num-voters 4096 --gpu-tile-size 32 --run-gpu
+ncu uv run scaling_elections.py --num-candidates 4096 --num-voters 4096 --gpu-tile-size 32 --run-gpu
 >  void _cuda_independent<32>(unsigned int, unsigned int, unsigned int *) (128, 128, 1)x(32, 32, 1), Context 1, Stream 7, Device 0, CC 9.0
 >    Section: GPU Speed Of Light Throughput
 >    ----------------------- ----------- ------------

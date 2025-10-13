@@ -450,7 +450,7 @@ wheels = [
 ]
 
 [[package]]
-name = "scalingdemocracy"
+name = "scalingelections"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [

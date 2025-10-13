@@ -2,7 +2,7 @@
 Mojo implementation of the Schulze voting algorithm with CPU and GPU acceleration.
 
 This implementation provides parallel computation of strongest paths for democratic voting,
-ported from the original Python/CUDA implementation in benchmark.py and scaling_democracy.cu.
+ported from the original Python/CUDA implementation in benchmark.py and scaling_elections.cu.
 The Schulze method is a Condorcet voting system that selects the candidate who would win
 in head-to-head comparisons against all other candidates.
 
@@ -11,15 +11,15 @@ in head-to-head comparisons against all other candidates.
 Run directly with Mojo via Pixi:
 
 ```bash
-pixi run mojo scaling_democracy.mojo
-pixi run mojo scaling_democracy.mojo --num-candidates 4096 --num-voters 4096
+pixi run mojo scaling_elections.mojo
+pixi run mojo scaling_elections.mojo --num-candidates 4096 --num-voters 4096
 ```
 
 Or compile and run:
 
 ```bash
-pixi run mojo build scaling_democracy.mojo -o scaling_democracy
-./scaling_democracy
+pixi run mojo build scaling_elections.mojo -o scaling_elections
+./scaling_elections
 ```
 
 See: https://ashvardanian.com/posts/scaling-democracy/
@@ -588,7 +588,7 @@ fn detect_gpu() -> Bool:
 # =============================================================================
 #
 # Implementation of three-phase tiled Floyd-Warshall algorithm on GPU
-# Matching the CUDA reference in scaling_democracy.cu
+# Matching the CUDA reference in scaling_elections.cu
 # =============================================================================
 
 alias SharedUInt32Ptr = UnsafePointer[UInt32, address_space=AddressSpace(3)]
@@ -836,7 +836,7 @@ fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatri
     Pure Mojo GPU implementation of Schulze strongest paths computation.
 
     Implements three-phase tiled Floyd-Warshall algorithm on GPU using native
-    Mojo GPU kernels. Matches the CUDA implementation in scaling_democracy.cu.
+    Mojo GPU kernels. Matches the CUDA implementation in scaling_elections.cu.
 
     Parameters:
         tile_size: Compile-time tile size for GPU processing (default: 32).
@@ -962,7 +962,7 @@ fn has_flag[origin: Origin](args: VariadicList[StringSlice[origin]], flag: Strin
 
 fn print_usage():
     """Print usage information."""
-    print("Usage: mojo scaling_democracy.mojo [OPTIONS]")
+    print("Usage: mojo scaling_elections.mojo [OPTIONS]")
     print()
     print("Options:")
     print("  --num-candidates N    Number of candidates (default: 128)")
@@ -975,9 +975,9 @@ fn print_usage():
     print("  --help, -h            Show this help message")
     print()
     print("Examples:")
-    print("  pixi run mojo scaling_democracy.mojo --num-candidates 256 --num-voters 4000")
-    print("  pixi run mojo scaling_democracy.mojo --num-candidates 4096 --run-cpu --run-gpu")
-    print("  pixi run mojo scaling_democracy.mojo --num-candidates 4096 --run-gpu --no-serial")
+    print("  pixi run mojo scaling_elections.mojo --num-candidates 256 --num-voters 4000")
+    print("  pixi run mojo scaling_elections.mojo --num-candidates 4096 --run-cpu --run-gpu")
+    print("  pixi run mojo scaling_elections.mojo --num-candidates 4096 --run-gpu --no-serial")
 
 fn main():
     """
