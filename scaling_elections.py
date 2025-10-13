@@ -20,6 +20,7 @@ For proper benchmarking with large random-generated preference matrices:
 
 See: https://github.com/ashvardanian/ScalingElections
 """
+
 from typing import Sequence, Tuple, List
 import warnings
 
@@ -316,7 +317,12 @@ def format_throughput(cells_per_sec: float) -> str:
         return f"{cells_per_sec / 1e3:.1f} Kcells³/s"
 
 
-def benchmark_implementation(callback, preferences: np.ndarray, warmup: int, repeat: int):
+def benchmark_implementation(
+    callback,
+    preferences: np.ndarray,
+    warmup: int,
+    repeat: int,
+):
     """Run warmup and benchmark iterations, returning (avg_time, result, success).
 
     Args:
@@ -485,13 +491,20 @@ if __name__ == "__main__":
         print("→ Serial (Numba)")
         try:
             avg_time, serial_result, _ = benchmark_implementation(
-                compute_strongest_paths_numba_serial, preferences, args.warmup, args.repeat
+                compute_strongest_paths_numba_serial,
+                preferences,
+                args.warmup,
+                args.repeat,
             )
             throughput = num_candidates**3 / avg_time
             if args.repeat > 1:
-                print(f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}")
+                print(
+                    f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}"
+                )
             else:
-                print(f"  Run:     {format_time(avg_time)} │ {format_throughput(throughput)}")
+                print(
+                    f"  Run:     {format_time(avg_time)} │ {format_throughput(throughput)}"
+                )
         except Exception as e:
             print(f"  ✗ Benchmark failed: {e}")
         print()
@@ -508,12 +521,18 @@ if __name__ == "__main__":
 
         print(f"→ {name}")
         try:
-            avg_time, result, _ = benchmark_implementation(callback, preferences, args.warmup, args.repeat)
+            avg_time, result, _ = benchmark_implementation(
+                callback, preferences, args.warmup, args.repeat
+            )
             throughput = num_candidates**3 / avg_time
             if args.repeat > 1:
-                print(f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}")
+                print(
+                    f"  Run:     {format_time(avg_time)} (avg of {args.repeat}) │ {format_throughput(throughput)}"
+                )
             else:
-                print(f"  Run:     {format_time(avg_time)} │ {format_throughput(throughput)}")
+                print(
+                    f"  Run:     {format_time(avg_time)} │ {format_throughput(throughput)}"
+                )
 
             # Validate against serial baseline if available
             if serial_result is not None:
@@ -540,5 +559,7 @@ if __name__ == "__main__":
     print()
     print(f"  Winner: Candidate #{winner}")
     if len(ranking) >= 5:
-        print(f"  Top 5:  #{ranking[0]}, #{ranking[1]}, #{ranking[2]}, #{ranking[3]}, #{ranking[4]}")
+        print(
+            f"  Top 5:  #{ranking[0]}, #{ranking[1]}, #{ranking[2]}, #{ranking[3]}, #{ranking[4]}"
+        )
     print()

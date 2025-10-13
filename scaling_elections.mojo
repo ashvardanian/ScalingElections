@@ -141,8 +141,7 @@ fn build_pairwise_preferences(voter_rankings: List[List[Int]]) -> PreferenceMatr
         # Create complete ranking if incomplete
         var complete_ranking = List[Int]()
         var used = List[Bool]()
-        for _ in range(num_candidates):
-            used.append(False)
+        used.resize(num_candidates, False)
 
         # Add provided candidates
         for j in range(len(ranking)):
@@ -447,8 +446,7 @@ fn get_winner_and_ranking(candidates: List[Int], strongest_paths: StrongestPaths
     """
     var num_candidates = len(candidates)
     var wins = List[Int]()
-    for _ in range(num_candidates):
-        wins.append(0)
+    wins.resize(num_candidates, 0)
 
     # Count wins for each candidate
     for i in range(num_candidates):
@@ -469,8 +467,7 @@ fn get_winner_and_ranking(candidates: List[Int], strongest_paths: StrongestPaths
     # Create ranking by sorting candidates by win count
     var ranking = List[Int]()
     var used = List[Bool]()
-    for _ in range(num_candidates):
-        used.append(False)
+    used.resize(num_candidates, False)
 
     # Add candidates in order of decreasing wins
     for _ in range(num_candidates):
@@ -494,18 +491,29 @@ fn generate_random_preferences(num_candidates: Int, num_voters: Int) -> Preferen
 
     Args:
         num_candidates: Number of candidates.
-        num_voters: Number of voters.
+        num_voters: Number of voters. If 0, generates random preference matrix directly.
 
     Returns:
         Random preference matrix.
     """
     var preferences = PreferenceMatrix(num_candidates)
 
-    for _ in range(num_voters):
-        # Generate random ranking
-        var ranking = List[Int]()
+    # Fast path: directly generate random preference matrix
+    if num_voters == 0:
         for i in range(num_candidates):
-            ranking.append(i)
+            for j in range(num_candidates):
+                preferences[i, j] = UInt32(random_si64(0, num_candidates))
+        return preferences^
+
+    # Slow path: generate from voter rankings
+    # Allocate ranking once and reuse for all voters
+    var ranking = List[Int]()
+    ranking.resize(num_candidates, 0)
+
+    for _ in range(num_voters):
+        # Re-initialize ranking in-place
+        for i in range(num_candidates):
+            ranking[i] = i
 
         # Fisher-Yates shuffle
         for i in range(num_candidates - 1, 0, -1):
@@ -867,8 +875,9 @@ fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatri
     var num_candidates = preferences.num_candidates
     var result = StrongestPathsMatrix(num_candidates)
 
-    # Step 1: Initialize result matrix on CPU (same as CPU version)
-    for i in range(num_candidates):
+    # Step 1: Initialize result matrix on CPU (parallelized)
+    @parameter
+    fn init_paths(i: Int):
         for j in range(num_candidates):
             if i != j:
                 var pref_ij = preferences[i, j]
@@ -877,6 +886,8 @@ fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatri
                     result[i, j] = pref_ij
                 else:
                     result[i, j] = 0
+
+    parallelize[init_paths](num_candidates)
 
     # Step 2: Create GPU device context
     var ctx = DeviceContext()
@@ -984,6 +995,7 @@ fn print_usage():
     print("Options:")
     print("  --num-candidates N    Number of candidates (default: 128)")
     print("  --num-voters N        Number of voters (default: 2000)")
+    print("                        Set to 0 for instant random preference matrix generation")
     print("  --run-cpu             Run CPU implementations")
     print("  --run-gpu             Run GPU implementation")
     print("  --no-serial           Skip serial baseline")
@@ -996,7 +1008,7 @@ fn print_usage():
     print("Examples:")
     print("  pixi run mojo scaling_elections.mojo --num-candidates 256 --num-voters 4000")
     print("  pixi run mojo scaling_elections.mojo --num-candidates 4096 --run-cpu --run-gpu")
-    print("  pixi run mojo scaling_elections.mojo --num-candidates 4096 --run-gpu --no-serial")
+    print("  pixi run mojo scaling_elections.mojo --num-candidates 16384 --num-voters 0 --run-gpu --no-serial")
 
 fn main():
     """
@@ -1050,7 +1062,8 @@ fn main():
         return
 
     print("Configuration:")
-    print("  Problem size: " + String(num_candidates) + " candidates × " + String(num_voters) + " voters")
+    var voters_str = String(num_voters) + " voters" if num_voters > 0 else "random"
+    print("  Problem size: " + String(num_candidates) + " candidates × " + voters_str)
     print("  CPU tile: " + String(TILE_SIZE) + " × " + String(TILE_SIZE))
     if run_gpu:
         print("  GPU tile: " + String(gpu_tile_size) + " × " + String(gpu_tile_size))
