@@ -77,13 +77,19 @@ pixi run mojo build scaling_elections.mojo -o schulze
 
 ## Throughput
 
-| Candidates |   Numba, `384c` | Mojo 🔥, `384c` | Mojo 🔥 SIMD, `384c` |    CUDA, `h100` |  Mojo 🔥, `h100` |
-| :--------- | --------------: | -------------: | ------------------: | --------------: | --------------: |
-| 2'048      |  34.4 Gcells³/s | 37.9 Gcells³/s |      62.1 Gcells³/s | 182.7 Gcells³/s | 153.4 Gcells³/s |
-| 4'096      |  86.8 Gcells³/s | 59.8 Gcells³/s |     171.5 Gcells³/s | 264.1 Gcells³/s | 232.6 Gcells³/s |
-| 8'192      |  74.6 Gcells³/s | 76.6 Gcells³/s |     357.3 Gcells³/s | 495.3 Gcells³/s | 408.0 Gcells³/s |
-| 16'384     |  76.7 Gcells³/s | 80.7 Gcells³/s |     369.0 Gcells³/s | 600.7 Gcells³/s | 635.3 Gcells³/s |
-| 32'768     | 101.4 Gcells³/s | 82.3 Gcells³/s |     293.1 Gcells³/s | 921.4 Gcells³/s | 893.7 Gcells³/s |
+Similar to measuring matrix multiplications in FLOPS, we can measure the throughput of the Schulze algorithm in cells per second.
+Or in our case, in GigaCells per Second (gcs), where a cell is a single pairwise comparison between two candidates.
+
+| Candidates | Numba `384c` | Mojo 🔥 `384c` | Mojo 🔥 SIMD `384c` | CUDA `h100` | Mojo 🔥 `h100` |
+| :--------- | -----------: | ------------: | -----------------: | ----------: | ------------: |
+| 2'048      |     34.4 gcs |      37.9 gcs |           62.1 gcs |   182.7 gcs |     153.4 gcs |
+| 4'096      |     86.8 gcs |      59.8 gcs |          171.5 gcs |   264.1 gcs |     232.6 gcs |
+| 8'192      |     74.6 gcs |      76.6 gcs |          357.3 gcs |   495.3 gcs |     408.0 gcs |
+| 16'384     |     76.7 gcs |      80.7 gcs |          369.0 gcs |   600.7 gcs |     635.3 gcs |
+| 32'768     |    101.4 gcs |      82.3 gcs |          293.1 gcs |   921.4 gcs |     893.7 gcs |
+
+> The `384c` columns refer to benchmarks obtained on AWS `m8i` instances with dual-socket Xeon 6 CPUs, totalling 384 cores.
+> The `h100` columns refer to benchmarks obtained on Nebius GPU instances with NVIDIA H100 GPUs.
 
 ---
 
