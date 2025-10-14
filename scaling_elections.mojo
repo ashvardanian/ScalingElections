@@ -957,15 +957,6 @@ fn format_throughput_from_ns(elapsed_ns: Int, num_candidates: Int) -> String:
     var cells_per_sec = total_cells / elapsed_sec
     return format_throughput(cells_per_sec)
 
-fn detect_gpu() -> Bool:
-    """
-    Detect if GPU accelerator is available in Mojo.
-
-    Returns:
-        True if GPU is available, False otherwise.
-    """
-    return has_accelerator()
-
 # =============================================================================
 # PURE MOJO GPU KERNELS FOR SCHULZE VOTING ALGORITHM
 # =============================================================================
@@ -1414,8 +1405,7 @@ fn main():
     print()
 
     if run_gpu:
-        var gpu_available = detect_gpu()
-        if not gpu_available:
+        if not has_accelerator():
             print("✗ No GPU detected - GPU mode disabled")
             run_gpu = False
 
