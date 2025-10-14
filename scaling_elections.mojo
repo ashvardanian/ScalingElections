@@ -659,8 +659,14 @@ fn compute_strongest_paths_tiled_cpu_simd[tile_size: Int = DEFAULT_CPU_TILE_SIZE
     Returns:
         StrongestPathsMatrix with computed strongest paths.
     """
-    # Use SIMD width of 8 for uint32 (works on AVX2/AVX-512)
-    alias simd_width = 8
+    # Use largest power-of-2 SIMD width (up to 16 for AVX-512) that divides tile_size
+    alias simd_width = (
+        16 if tile_size % 16 == 0 else
+        8 if tile_size % 8 == 0 else
+        4 if tile_size % 4 == 0 else
+        2 if tile_size % 2 == 0 else
+        1
+    )
     var num_candidates = preferences.num_candidates
     var strongest_paths = StrongestPathsMatrix(num_candidates)
 
