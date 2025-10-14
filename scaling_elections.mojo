@@ -619,32 +619,6 @@ fn compute_strongest_paths_tiled_cpu[tile_size: Int = DEFAULT_CPU_TILE_SIZE](pre
 
     return strongest_paths^
 
-fn compute_strongest_paths_tiled_cpu_dispatch[*allowed_sizes: Int](preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
-    """
-    Runtime dispatcher for CPU tiled implementation.
-    Pre-compiles variants for allowed tile sizes and dispatches based on runtime value.
-
-    Parameters:
-        allowed_sizes: Variadic list of compile-time tile sizes to support.
-
-    Args:
-        preferences: Input preference matrix.
-        tile_size: Runtime tile size selection.
-
-    Returns:
-        Computed strongest paths matrix.
-    """
-    alias sizes = VariadicList(allowed_sizes)
-
-    @parameter
-    for size in sizes:
-        if tile_size == size:
-            return compute_strongest_paths_tiled_cpu[size](preferences)
-
-    # Fallback for unsupported sizes
-    print("Warning: Unsupported CPU tile size", tile_size, "- falling back to default", DEFAULT_CPU_TILE_SIZE)
-    return compute_strongest_paths_tiled_cpu[DEFAULT_CPU_TILE_SIZE](preferences)
-
 fn compute_strongest_paths_tiled_cpu_simd[tile_size: Int = DEFAULT_CPU_TILE_SIZE](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
     """
     SIMD-vectorized tiled CPU implementation of Schulze strongest paths computation.
@@ -801,7 +775,7 @@ fn compute_strongest_paths_tiled_cpu_simd[tile_size: Int = DEFAULT_CPU_TILE_SIZE
 
     return strongest_paths^
 
-fn get_winner_and_ranking(strongest_paths: StrongestPathsMatrix) -> (Int, List[Int]):
+fn compute_election_results(strongest_paths: StrongestPathsMatrix) -> (Int, List[Int]):
     """
     Determines the winner and ranking based on strongest paths matrix.
 
@@ -905,7 +879,7 @@ fn run_warmup(
         else:
             print("  Warm-up: " + format_time(elapsed_ns))
 
-fn run_and_average(
+fn measure_and_average(
     implementation: fn(PreferenceMatrix) raises -> StrongestPathsMatrix,
     preferences: PreferenceMatrix,
     repeat: Int,
@@ -926,7 +900,7 @@ fn run_and_average(
     var avg_time = total_time // repeat
     return avg_time
 
-fn benchmark_implementation(
+fn profile_and_report(
     label: String,
     implementation: fn(PreferenceMatrix) raises -> StrongestPathsMatrix,
     preferences: PreferenceMatrix,
@@ -937,7 +911,7 @@ fn benchmark_implementation(
     baseline: StrongestPathsMatrix
 ) raises -> (Bool, Int, List[Int]):
     """
-    Benchmark an implementation and validate results.
+    Profile an implementation's performance and report results with validation.
     Returns (success, winner_idx, ranking) tuple.
     """
     print("→ " + label)
@@ -947,7 +921,7 @@ fn benchmark_implementation(
 
     # Benchmark
     var result = StrongestPathsMatrix(0)
-    var avg_time = run_and_average(implementation, preferences, repeat, result)
+    var avg_time = measure_and_average(implementation, preferences, repeat, result)
 
     # Print results
     if repeat > 1:
@@ -956,13 +930,13 @@ fn benchmark_implementation(
         print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
 
     # Validate
-    if has_baseline and validate_results(result, baseline):
+    if has_baseline and validate_against_baseline(result, baseline):
         print("  ✓ Results validated")
     elif has_baseline:
         print("  ✗ Results don't match baseline!")
 
     # Extract winner
-    var result_tuple = get_winner_and_ranking(result)
+    var result_tuple = compute_election_results(result)
     var winner_idx = result_tuple[0]
     var winner_ranking = result_tuple[1].copy()
 
@@ -1348,33 +1322,7 @@ fn compute_strongest_paths_gpu[tile_size: Int = DEFAULT_GPU_TILE_SIZE](preferenc
 
     return result^
 
-fn compute_strongest_paths_gpu_dispatch[*allowed_sizes: Int](preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
-    """
-    Runtime dispatcher for GPU implementation.
-    Pre-compiles variants for allowed tile sizes and dispatches based on runtime value.
-
-    Parameters:
-        allowed_sizes: Variadic list of compile-time tile sizes to support.
-
-    Args:
-        preferences: Input preference matrix.
-        tile_size: Runtime tile size selection.
-
-    Returns:
-        Computed strongest paths matrix.
-    """
-    alias sizes = VariadicList(allowed_sizes)
-
-    @parameter
-    for size in sizes:
-        if tile_size == size:
-            return compute_strongest_paths_gpu[size](preferences)
-
-    # Fallback for unsupported sizes
-    print("Warning: Unsupported GPU tile size", tile_size, "- falling back to default", DEFAULT_GPU_TILE_SIZE)
-    return compute_strongest_paths_gpu[DEFAULT_GPU_TILE_SIZE](preferences)
-
-fn validate_results(result: StrongestPathsMatrix, baseline: StrongestPathsMatrix) -> Bool:
+fn validate_against_baseline(result: StrongestPathsMatrix, baseline: StrongestPathsMatrix) -> Bool:
     """Check if two results match."""
     var n = result.num_candidates
     for i in range(n):
@@ -1507,7 +1455,7 @@ fn main():
             print("→ Serial (Mojo)")
             run_warmup(compute_strongest_paths_serial, preferences, warmup)
 
-            var avg_time = run_and_average(compute_strongest_paths_serial, preferences, repeat, baseline)
+            var avg_time = measure_and_average(compute_strongest_paths_serial, preferences, repeat, baseline)
 
             if repeat > 1:
                 print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
@@ -1515,7 +1463,7 @@ fn main():
                 print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
 
             has_baseline = True
-            var result_tuple = get_winner_and_ranking(baseline)
+            var result_tuple = compute_election_results(baseline)
             winner = result_tuple[0]
             ranking = result_tuple[1].copy()
             has_winner = True
@@ -1533,7 +1481,7 @@ fn main():
                 alias tile_size = ALLOWED_CPU_TILE_SIZES[i]
                 if cpu_tile_size != tile_size: continue
 
-                var result_tuple = benchmark_implementation(
+                var result_tuple = profile_and_report(
                     "Tiled CPU (Mojo)",
                     compute_strongest_paths_tiled_cpu[tile_size],
                     preferences, warmup, repeat, num_candidates, has_baseline, baseline
@@ -1555,7 +1503,7 @@ fn main():
                 alias tile_size = ALLOWED_CPU_TILE_SIZES[i]
                 if cpu_tile_size != tile_size: continue
 
-                var result_tuple = benchmark_implementation(
+                var result_tuple = profile_and_report(
                     "Tiled CPU+SIMD (Mojo)",
                     compute_strongest_paths_tiled_cpu_simd[tile_size],
                     preferences, warmup, repeat, num_candidates, has_baseline, baseline
@@ -1576,8 +1524,8 @@ fn main():
             for i in range(len(ALLOWED_GPU_TILE_SIZES)):
                 alias tile_size = ALLOWED_GPU_TILE_SIZES[i]
                 if gpu_tile_size != tile_size: continue
-                
-                var result_tuple = benchmark_implementation(
+
+                var result_tuple = profile_and_report(
                     "Tiled GPU (Mojo)",
                     compute_strongest_paths_gpu[tile_size],
                     preferences, warmup, repeat, num_candidates, has_baseline, baseline
@@ -1594,7 +1542,7 @@ fn main():
     if not has_winner:
         try:
             var fallback = compute_strongest_paths_serial(preferences)
-            var result_tuple = get_winner_and_ranking(fallback)
+            var result_tuple = compute_election_results(fallback)
             winner = result_tuple[0]
             ranking = result_tuple[1].copy()
         except e:
