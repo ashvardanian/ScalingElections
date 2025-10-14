@@ -308,6 +308,9 @@ fn process_tile_cpu_simd_independent[tile_size: Int, simd_width: Int](
         b: Second input tile.
         tile_stride: Stride for accessing tiles.
     """
+    # Compile-time assertion: tile_size must be divisible by simd_width
+    constrained[tile_size % simd_width == 0, "tile_size must be divisible by simd_width"]()
+
     # Process k loop over intermediate values
     for k in range(tile_size):
         # Process each row
@@ -315,9 +318,9 @@ fn process_tile_cpu_simd_independent[tile_size: Int, simd_width: Int](
             var a_val = a[bi * tile_stride + k]
 
             # Vectorized processing of columns (j dimension)
-            var num_simd_chunks = tile_size // simd_width
+            alias num_simd_chunks = tile_size // simd_width
 
-            # Process full SIMD chunks
+            # Process all elements with SIMD
             for chunk in range(num_simd_chunks):
                 var bj = chunk * simd_width
                 var c_base_idx = bi * tile_stride + bj
@@ -336,15 +339,6 @@ fn process_tile_cpu_simd_independent[tile_size: Int, simd_width: Int](
 
                 # Store result
                 c.store[width=simd_width](c_base_idx, new_c)
-
-            # Handle remainder elements (scalar fallback)
-            for bj in range(num_simd_chunks * simd_width, tile_size):
-                var c_idx = bi * tile_stride + bj
-                var b_val = b[k * tile_stride + bj]
-                var c_val = c[c_idx]
-                var new_val = min(a_val, b_val)
-                if new_val > c_val:
-                    c[c_idx] = new_val
 
 fn process_tile_cpu_simd_diagonal[tile_size: Int, simd_width: Int](
     c: UnsafePointer[UInt32],
@@ -370,6 +364,9 @@ fn process_tile_cpu_simd_diagonal[tile_size: Int, simd_width: Int](
         num_candidates: Total number of candidates.
         tile_stride: Stride for accessing tiles.
     """
+    # Compile-time assertion: tile_size must be divisible by simd_width
+    constrained[tile_size % simd_width == 0, "tile_size must be divisible by simd_width"]()
+
     # Process k loop
     for k in range(tile_size):
         var global_k = a_col + k
@@ -380,9 +377,9 @@ fn process_tile_cpu_simd_diagonal[tile_size: Int, simd_width: Int](
             var a_val = a[bi * tile_stride + k]
 
             # Vectorized processing with diagonal masking
-            var num_simd_chunks = tile_size // simd_width
+            alias num_simd_chunks = tile_size // simd_width
 
-            # Process full SIMD chunks
+            # Process all elements with SIMD
             for chunk in range(num_simd_chunks):
                 var bj = chunk * simd_width
                 var c_base_idx = bi * tile_stride + bj
@@ -414,21 +411,6 @@ fn process_tile_cpu_simd_diagonal[tile_size: Int, simd_width: Int](
                 # Conditional update using select (mask ? min_val : c_vec)
                 var new_c = mask.select(min_val, c_vec)
                 c.store[width=simd_width](c_base_idx, new_c)
-
-            # Handle remainder elements
-            for bj in range(num_simd_chunks * simd_width, tile_size):
-                var global_j = c_col + bj
-
-                # Skip diagonal elements
-                if global_i == global_j or global_i == global_k or global_k == global_j:
-                    continue
-
-                var c_idx = bi * tile_stride + bj
-                var b_val = b[k * tile_stride + bj]
-                var c_val = c[c_idx]
-                var new_val = min(a_val, b_val)
-                if new_val > c_val:
-                    c[c_idx] = new_val
 
 fn copy_tile_to_buffer(
     source: UnsafePointer[UInt32],
