@@ -35,12 +35,20 @@ pixi run mojo build scaling_elections.mojo -o scaling_elections
 See: https://ashvardanian.com/posts/scaling-democracy/
 """
 
+# Core data structures and memory management
 from collections import List
 from memory import UnsafePointer, memset_zero, stack_allocation, AddressSpace
+
+# Algorithms and utilities
 from algorithm import parallelize
 from random import random_si64
-from time import perf_counter_ns
+
+# System and runtime
 from sys import argv, has_accelerator
+from time import perf_counter_ns
+
+# GPU acceleration
+from buffer import NDBuffer
 from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
 from gpu.id import block_idx, thread_idx, block_dim, global_idx
 from gpu.sync import barrier
