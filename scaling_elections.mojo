@@ -55,6 +55,13 @@ alias CandidateIdx = Int
 alias DEFAULT_CPU_TILE_SIZE = 16  # Optimized for CPU cache
 alias DEFAULT_GPU_TILE_SIZE = 32  # Optimized for GPU warp size
 
+# Allowed tile sizes for runtime selection (compile-time pre-compiled variants)
+# CPU: Optimized for cache line sizes (64 bytes) and L1/L2 cache
+alias ALLOWED_CPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64, 96, 128)
+# GPU: Aligned with warp sizes - NVIDIA (32) and AMD (64)
+# Block dimensions: 8x8=64, 16x16=256, 32x32=1024 threads
+alias ALLOWED_GPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64)
+
 @fieldwise_init
 struct PreferenceMatrix(Movable):
     """Represents a preference matrix for Schulze voting."""
@@ -453,25 +460,27 @@ fn compute_strongest_paths_tiled_cpu[tile_size: Int = DEFAULT_CPU_TILE_SIZE](pre
 
     return strongest_paths^
 
-fn compute_strongest_paths_tiled_cpu_dispatch(preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
+fn compute_strongest_paths_tiled_cpu_dispatch[*allowed_sizes: Int](preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
     """
     Runtime dispatcher for CPU tiled implementation.
     Pre-compiles variants for allowed tile sizes and dispatches based on runtime value.
 
-    Allowed tile sizes: 8, 16, 32
-    """
-    @parameter
-    for i in range(3):
-        @parameter
-        if i == 0:
-            alias allowed_size = 8
-        elif i == 1:
-            alias allowed_size = 16
-        else:
-            alias allowed_size = 32
+    Parameters:
+        allowed_sizes: Variadic list of compile-time tile sizes to support.
 
-        if tile_size == allowed_size:
-            return compute_strongest_paths_tiled_cpu[allowed_size](preferences)
+    Args:
+        preferences: Input preference matrix.
+        tile_size: Runtime tile size selection.
+
+    Returns:
+        Computed strongest paths matrix.
+    """
+    alias sizes = VariadicList(allowed_sizes)
+
+    @parameter
+    for size in sizes:
+        if tile_size == size:
+            return compute_strongest_paths_tiled_cpu[size](preferences)
 
     # Fallback for unsupported sizes
     print("Warning: Unsupported CPU tile size", tile_size, "- falling back to default", DEFAULT_CPU_TILE_SIZE)
@@ -996,23 +1005,27 @@ fn compute_strongest_paths_gpu[tile_size: Int = DEFAULT_GPU_TILE_SIZE](preferenc
 
     return result^
 
-fn compute_strongest_paths_gpu_dispatch(preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
+fn compute_strongest_paths_gpu_dispatch[*allowed_sizes: Int](preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
     """
     Runtime dispatcher for GPU implementation.
     Pre-compiles variants for allowed tile sizes and dispatches based on runtime value.
 
-    Allowed tile sizes: 16, 32
-    """
-    @parameter
-    for i in range(2):
-        @parameter
-        if i == 0:
-            alias allowed_size = 16
-        else:
-            alias allowed_size = 32
+    Parameters:
+        allowed_sizes: Variadic list of compile-time tile sizes to support.
 
-        if tile_size == allowed_size:
-            return compute_strongest_paths_gpu[allowed_size](preferences)
+    Args:
+        preferences: Input preference matrix.
+        tile_size: Runtime tile size selection.
+
+    Returns:
+        Computed strongest paths matrix.
+    """
+    alias sizes = VariadicList(allowed_sizes)
+
+    @parameter
+    for size in sizes:
+        if tile_size == size:
+            return compute_strongest_paths_gpu[size](preferences)
 
     # Fallback for unsupported sizes
     print("Warning: Unsupported GPU tile size", tile_size, "- falling back to default", DEFAULT_GPU_TILE_SIZE)
@@ -1056,8 +1069,8 @@ fn print_usage():
     print("  --run-cpu             Run CPU implementations")
     print("  --run-gpu             Run GPU implementation")
     print("  --no-serial           Skip serial baseline")
-    print("  --cpu-tile-size N     CPU tile size: 8, 16, 32 (default: 16)")
-    print("  --gpu-tile-size N     GPU tile size: 16, 32 (default: 32)")
+    print("  --cpu-tile-size N     CPU tile size: 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 (default: 16)")
+    print("  --gpu-tile-size N     GPU tile size: 4, 8, 12, 16, 24, 32, 48, 64 (default: 32)")
     print("  --warmup N            Number of warmup iterations (default: 1)")
     print("  --repeat N            Number of benchmark iterations (default: 1)")
     print("  --help, -h            Show this help message")
@@ -1104,14 +1117,14 @@ fn main():
             run_gpu = False
 
     # Validate CPU tile size
-    if cpu_tile_size not in (8, 16, 32):
-        print("Warning: --cpu-tile-size must be 8, 16, or 32. Using default:", DEFAULT_CPU_TILE_SIZE)
+    if cpu_tile_size not in ALLOWED_CPU_TILE_SIZES:
+        print("Warning: --cpu-tile-size must be 4, 8, 12, 16, 24, 32, 48, 64, 96, or 128. Using default:", DEFAULT_CPU_TILE_SIZE)
         cpu_tile_size = DEFAULT_CPU_TILE_SIZE
         print()
 
     # Validate GPU tile size
-    if run_gpu and gpu_tile_size not in (16, 32):
-        print("Warning: --gpu-tile-size must be 16 or 32. Using default:", DEFAULT_GPU_TILE_SIZE)
+    if run_gpu and gpu_tile_size not in ALLOWED_GPU_TILE_SIZES:
+        print("Warning: --gpu-tile-size must be 4, 8, 12, 16, 24, 32, 48, or 64. Using default:", DEFAULT_GPU_TILE_SIZE)
         gpu_tile_size = DEFAULT_GPU_TILE_SIZE
         print()
 
@@ -1177,7 +1190,8 @@ fn main():
             # Warmup
             for i in range(warmup):
                 var start_time = perf_counter_ns()
-                _ = compute_strongest_paths_tiled_cpu_dispatch(preferences, cpu_tile_size)
+                # TODO: Find a way to pass ALLOWED_CPU_TILE_SIZES, instead of repeating here
+                _ = compute_strongest_paths_tiled_cpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64, 96, 128](preferences, cpu_tile_size)
                 var elapsed_ns = perf_counter_ns() - start_time
                 if warmup > 1:
                     print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
@@ -1189,7 +1203,8 @@ fn main():
             var cpu_result = StrongestPathsMatrix(0)
             for _ in range(repeat):
                 var start_time = perf_counter_ns()
-                cpu_result = compute_strongest_paths_tiled_cpu_dispatch(preferences, cpu_tile_size)
+                # TODO: Find a way to pass ALLOWED_CPU_TILE_SIZES, instead of repeating here
+                cpu_result = compute_strongest_paths_tiled_cpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64, 96, 128](preferences, cpu_tile_size)
                 var elapsed_ns = perf_counter_ns() - start_time
                 times.append(elapsed_ns)
 
@@ -1228,7 +1243,8 @@ fn main():
             # Warmup
             for i in range(warmup):
                 var start_time = perf_counter_ns()
-                _ = compute_strongest_paths_gpu_dispatch(preferences, gpu_tile_size)
+                # TODO: Find a way to pass ALLOWED_GPU_TILE_SIZES, instead of repeating here
+                _ = compute_strongest_paths_gpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64](preferences, gpu_tile_size)
                 var elapsed_ns = perf_counter_ns() - start_time
                 if warmup > 1:
                     print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
@@ -1240,7 +1256,8 @@ fn main():
             var gpu_result = StrongestPathsMatrix(0)
             for _ in range(repeat):
                 var start_time = perf_counter_ns()
-                gpu_result = compute_strongest_paths_gpu_dispatch(preferences, gpu_tile_size)
+                # TODO: Find a way to pass ALLOWED_GPU_TILE_SIZES, instead of repeating here
+                gpu_result = compute_strongest_paths_gpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64](preferences, gpu_tile_size)
                 var elapsed_ns = perf_counter_ns() - start_time
                 times.append(elapsed_ns)
 
