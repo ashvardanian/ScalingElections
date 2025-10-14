@@ -458,23 +458,25 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "cupy-cuda12x" },
+cpu = [
     { name = "numba", version = "0.60.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "numba", version = "0.61.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "pycuda" },
     { name = "pytest" },
+]
+gpu = [
+    { name = "cupy-cuda12x" },
+    { name = "pycuda" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "cupy-cuda12x", marker = "extra == 'dev'" },
-    { name = "numba", marker = "extra == 'dev'" },
+    { name = "cupy-cuda12x", marker = "extra == 'gpu'" },
+    { name = "numba", marker = "extra == 'cpu'" },
     { name = "numpy", specifier = ">=1.26,<2.0" },
-    { name = "pycuda", marker = "extra == 'dev'", specifier = ">=2025.1.2" },
-    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pycuda", marker = "extra == 'gpu'", specifier = ">=2025.1.2" },
+    { name = "pytest", marker = "extra == 'cpu'" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["cpu", "gpu"]
 
 [[package]]
 name = "siphash24"
