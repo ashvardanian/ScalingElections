@@ -920,6 +920,49 @@ fn run_and_average(
     var avg_time = total_time // repeat
     return avg_time
 
+fn benchmark_implementation(
+    label: String,
+    implementation: fn(PreferenceMatrix) raises -> StrongestPathsMatrix,
+    preferences: PreferenceMatrix,
+    warmup: Int,
+    repeat: Int,
+    num_candidates: Int,
+    has_baseline: Bool,
+    baseline: StrongestPathsMatrix
+) raises -> (Bool, Int, List[Int]):
+    """
+    Benchmark an implementation and validate results.
+    Returns (success, winner_idx, ranking) tuple.
+    """
+    print("→ " + label)
+
+    # Warmup
+    run_warmup(implementation, preferences, warmup)
+
+    # Benchmark
+    var result = StrongestPathsMatrix(0)
+    var avg_time = run_and_average(implementation, preferences, repeat, result)
+
+    # Print results
+    if repeat > 1:
+        print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
+    else:
+        print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
+
+    # Validate
+    if has_baseline and validate_results(result, baseline):
+        print("  ✓ Results validated")
+    elif has_baseline:
+        print("  ✗ Results don't match baseline!")
+
+    # Extract winner
+    var result_tuple = get_winner_and_ranking(result)
+    var winner_idx = result_tuple[0]
+    var winner_ranking = result_tuple[1].copy()
+
+    print()
+    return (True, winner_idx, winner_ranking^)
+
 fn format_time(elapsed_ns: Int) -> String:
     """Format time with appropriate unit (ms or s)."""
     var elapsed_ms = elapsed_ns // 1_000_000
@@ -1475,55 +1518,24 @@ fn main():
             print("  ✗ Serial failed: " + String(e))
             print()
 
-    # Run CPU implementation
+    # Run CPU implementation - dispatch to correct tile size
     if run_cpu:
         try:
-            print("→ Tiled CPU (Mojo)")
+            # TODO: Rewrite it once `Tuple.__iter__` is supported
+            @parameter
+            for i in range(len(ALLOWED_CPU_TILE_SIZES)):
+                alias tile_size = ALLOWED_CPU_TILE_SIZES[i]
+                if cpu_tile_size != tile_size: continue
 
-            # Warmup
-            for i in range(warmup):
-                var start_time = perf_counter_ns()
-                # TODO: Find a way to pass ALLOWED_CPU_TILE_SIZES, instead of repeating here
-                _ = compute_strongest_paths_tiled_cpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64, 96, 128](preferences, cpu_tile_size)
-                var elapsed_ns = perf_counter_ns() - start_time
-                if warmup > 1:
-                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
-                else:
-                    print("  Warm-up: " + format_time(elapsed_ns))
-
-            # Benchmark runs
-            var times = List[Int]()
-            var cpu_result = StrongestPathsMatrix(0)
-            for _ in range(repeat):
-                var start_time = perf_counter_ns()
-                # TODO: Find a way to pass ALLOWED_CPU_TILE_SIZES, instead of repeating here
-                cpu_result = compute_strongest_paths_tiled_cpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64, 96, 128](preferences, cpu_tile_size)
-                var elapsed_ns = perf_counter_ns() - start_time
-                times.append(elapsed_ns)
-
-            # Calculate average
-            var total_time: Int = 0
-            for i in range(len(times)):
-                total_time += times[i]
-            var avg_time = total_time // repeat
-
-            if repeat > 1:
-                print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
-            else:
-                print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
-
-            if has_baseline and validate_results(cpu_result, baseline):
-                print("  ✓ Results validated")
-            elif has_baseline:
-                print("  ✗ Results don't match baseline!")
-
-            if not has_winner:
-                var result_tuple = get_winner_and_ranking(cpu_result)
-                winner = result_tuple[0]
-                ranking = result_tuple[1].copy()
-                has_winner = True
-
-            print()
+                var result_tuple = benchmark_implementation(
+                    "Tiled CPU (Mojo)",
+                    compute_strongest_paths_tiled_cpu[tile_size],
+                    preferences, warmup, repeat, num_candidates, has_baseline, baseline
+                )
+                if not has_winner:
+                    winner = result_tuple[1]
+                    ranking = result_tuple[2].copy()
+                    has_winner = True
         except e:
             print("  ✗ CPU failed: " + String(e))
             print()
@@ -1531,103 +1543,43 @@ fn main():
     # Run SIMD CPU implementation
     if run_cpu:
         try:
-            print("→ Tiled CPU+SIMD (Mojo)")
+            # TODO: Rewrite it once `Tuple.__iter__` is supported
+            @parameter
+            for i in range(len(ALLOWED_CPU_TILE_SIZES)):
+                alias tile_size = ALLOWED_CPU_TILE_SIZES[i]
+                if cpu_tile_size != tile_size: continue
 
-            # Warmup
-            for i in range(warmup):
-                var start_time = perf_counter_ns()
-                _ = compute_strongest_paths_tiled_cpu_simd[DEFAULT_CPU_TILE_SIZE](preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                if warmup > 1:
-                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
-                else:
-                    print("  Warm-up: " + format_time(elapsed_ns))
-
-            # Benchmark runs
-            var times = List[Int]()
-            var cpu_simd_result = StrongestPathsMatrix(0)
-            for _ in range(repeat):
-                var start_time = perf_counter_ns()
-                cpu_simd_result = compute_strongest_paths_tiled_cpu_simd[DEFAULT_CPU_TILE_SIZE](preferences)
-                var elapsed_ns = perf_counter_ns() - start_time
-                times.append(elapsed_ns)
-
-            # Calculate average
-            var total_time: Int = 0
-            for i in range(len(times)):
-                total_time += times[i]
-            var avg_time = total_time // repeat
-
-            if repeat > 1:
-                print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
-            else:
-                print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
-
-            if has_baseline and validate_results(cpu_simd_result, baseline):
-                print("  ✓ Results validated")
-            elif has_baseline:
-                print("  ✗ Results don't match baseline!")
-
-            if not has_winner:
-                var result_tuple = get_winner_and_ranking(cpu_simd_result)
-                winner = result_tuple[0]
-                ranking = result_tuple[1].copy()
-                has_winner = True
-
-            print()
+                var result_tuple = benchmark_implementation(
+                    "Tiled CPU+SIMD (Mojo)",
+                    compute_strongest_paths_tiled_cpu_simd[tile_size],
+                    preferences, warmup, repeat, num_candidates, has_baseline, baseline
+                )
+                if not has_winner:
+                    winner = result_tuple[1]
+                    ranking = result_tuple[2].copy()
+                    has_winner = True
         except e:
             print("  ✗ CPU+SIMD failed: " + String(e))
             print()
 
-    # Run GPU implementation
+    # Run GPU implementation - dispatch to correct tile size
     if run_gpu:
         try:
-            print("→ Tiled GPU (Mojo)")
-
-            # Warmup
-            for i in range(warmup):
-                var start_time = perf_counter_ns()
-                # TODO: Find a way to pass ALLOWED_GPU_TILE_SIZES, instead of repeating here
-                _ = compute_strongest_paths_gpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64](preferences, gpu_tile_size)
-                var elapsed_ns = perf_counter_ns() - start_time
-                if warmup > 1:
-                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
-                else:
-                    print("  Warm-up: " + format_time(elapsed_ns))
-
-            # Benchmark runs
-            var times = List[Int]()
-            var gpu_result = StrongestPathsMatrix(0)
-            for _ in range(repeat):
-                var start_time = perf_counter_ns()
-                # TODO: Find a way to pass ALLOWED_GPU_TILE_SIZES, instead of repeating here
-                gpu_result = compute_strongest_paths_gpu_dispatch[4, 8, 12, 16, 24, 32, 48, 64](preferences, gpu_tile_size)
-                var elapsed_ns = perf_counter_ns() - start_time
-                times.append(elapsed_ns)
-
-            # Calculate average
-            var total_time: Int = 0
-            for i in range(len(times)):
-                total_time += times[i]
-            var avg_time = total_time // repeat
-
-            if repeat > 1:
-                print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
-            else:
-                print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
-
-            if has_baseline and validate_results(gpu_result, baseline):
-                print("  ✓ Results validated")
-            elif has_baseline:
-                print("  ✗ Results don't match baseline!")
-
-            if not has_winner:
-                var result_tuple = get_winner_and_ranking(gpu_result)
-                winner = result_tuple[0]
-                ranking = result_tuple[1].copy()
-                has_winner = True
-
-            print()
+            # TODO: Rewrite it once `Tuple.__iter__` is supported
+            @parameter
+            for i in range(len(ALLOWED_GPU_TILE_SIZES)):
+                alias tile_size = ALLOWED_GPU_TILE_SIZES[i]
+                if gpu_tile_size != tile_size: continue
+                
+                var result_tuple = benchmark_implementation(
+                    "Tiled GPU (Mojo)",
+                    compute_strongest_paths_gpu[tile_size],
+                    preferences, warmup, repeat, num_candidates, has_baseline, baseline
+                )
+                if not has_winner:
+                    winner = result_tuple[1]
+                    ranking = result_tuple[2].copy()
+                    has_winner = True
         except e:
             print("  ✗ GPU failed: " + String(e))
             print()
