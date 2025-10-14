@@ -51,8 +51,9 @@ from buffer import NDBuffer
 alias VotesCount = UInt32
 alias CandidateIdx = Int
 
-# Tile size for blocking optimization - matches CUDA implementation
-alias TILE_SIZE = 16
+# Tile sizes for blocking optimization - tuned for each architecture
+alias DEFAULT_CPU_TILE_SIZE = 16  # Optimized for CPU cache
+alias DEFAULT_GPU_TILE_SIZE = 32  # Optimized for GPU warp size
 
 @fieldwise_init
 struct PreferenceMatrix(Movable):
@@ -202,8 +203,8 @@ fn process_tile_cpu[tile_size: Int](
     a: UnsafePointer[UInt32],
     b: UnsafePointer[UInt32],
     c_row: Int, c_col: Int,
-    a_row: Int, a_col: Int,
-    b_row: Int, b_col: Int,
+    a_col: Int,
+    b_col: Int,
     num_candidates: Int,
     tile_stride: Int
 ):
@@ -216,9 +217,7 @@ fn process_tile_cpu[tile_size: Int](
         b: Second input tile.
         c_row: Row index of output tile.
         c_col: Column index of output tile.
-        a_row: Row index of first input tile.
         a_col: Column index of first input tile.
-        b_row: Row index of second input tile.
         b_col: Column index of second input tile.
         num_candidates: Total number of candidates.
         tile_stride: Stride for accessing tiles.
@@ -281,10 +280,31 @@ fn copy_buffer_to_tile(
             if row < num_candidates and col < num_candidates:
                 dest[row * num_candidates + col] = source[i * tile_size + j]
 
-fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+@always_inline
+fn calculate_tile_bounds(tile_idx: Int, tile_size: Int, total_size: Int) -> (Int, Int, Int):
+    """
+    Calculate tile boundaries for blocking algorithms.
+
+    Args:
+        tile_idx: Index of the tile.
+        tile_size: Size of each tile.
+        total_size: Total problem size.
+
+    Returns:
+        Tuple of (start_index, end_index, actual_size).
+    """
+    var start = tile_idx * tile_size
+    var end = min(start + tile_size, total_size)
+    var size = end - start
+    return (start, end, size)
+
+fn compute_strongest_paths_tiled_cpu[tile_size: Int = DEFAULT_CPU_TILE_SIZE](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
     """
     Tiled CPU implementation of Schulze strongest paths computation.
     Uses blocking for better cache utilization.
+
+    Parameters:
+        tile_size: Compile-time tile size for CPU processing (default: 16).
 
     Args:
         preferences: Input preference matrix.
@@ -310,31 +330,31 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) raises -> St
     parallelize[init_paths](num_candidates)
 
     # Step 2: Tiled Floyd-Warshall computation
-    var tiles_count = (num_candidates + TILE_SIZE - 1) // TILE_SIZE
+    var num_tiles = (num_candidates + tile_size - 1) // tile_size
 
-    for k in range(tiles_count):
-        var k_start = k * TILE_SIZE
-        var k_end = min(k_start + TILE_SIZE, num_candidates)
-        var k_size = k_end - k_start
+    for k in range(num_tiles):
+        var k_bounds = calculate_tile_bounds(k, tile_size, num_candidates)
+        var k_start = k_bounds[0]
+        var k_size = k_bounds[2]
 
         # Dependent phase: process diagonal tile
-        var diagonal_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-        memset_zero(diagonal_tile, TILE_SIZE * TILE_SIZE)
+        var diagonal_tile = stack_allocation[tile_size * tile_size, UInt32]()
+        memset_zero(diagonal_tile, tile_size * tile_size)
 
         copy_tile_to_buffer(
             strongest_paths.data, diagonal_tile,
-            k_start, k_start, k_size, num_candidates
+            k_start, k_start, tile_size, num_candidates
         )
 
-        process_tile_cpu[TILE_SIZE](
+        process_tile_cpu[tile_size](
             diagonal_tile, diagonal_tile, diagonal_tile,
-            k_start, k_start, k_start, k_start, k_start, k_start,
-            num_candidates, TILE_SIZE
+            k_start, k_start, k_start, k_start,
+            num_candidates, tile_size
         )
 
         copy_buffer_to_tile(
             diagonal_tile, strongest_paths.data,
-            k_start, k_start, k_size, num_candidates
+            k_start, k_start, tile_size, num_candidates
         )
 
         # Partially dependent phases - row tiles
@@ -343,27 +363,27 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) raises -> St
             if i == k:
                 return
 
-            var i_start = i * TILE_SIZE
-            var i_end = min(i_start + TILE_SIZE, num_candidates)
-            var i_size = i_end - i_start
+            var i_bounds = calculate_tile_bounds(i, tile_size, num_candidates)
+            var i_start = i_bounds[0]
+            var i_size = i_bounds[2]
 
-            var c_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-            var b_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-            memset_zero(c_tile, TILE_SIZE * TILE_SIZE)
-            memset_zero(b_tile, TILE_SIZE * TILE_SIZE)
+            var c_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            var b_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            memset_zero(c_tile, tile_size * tile_size)
+            memset_zero(b_tile, tile_size * tile_size)
 
-            copy_tile_to_buffer(strongest_paths.data, c_tile, i_start, k_start, i_size, num_candidates)
-            copy_tile_to_buffer(strongest_paths.data, b_tile, k_start, k_start, k_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, c_tile, i_start, k_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, b_tile, k_start, k_start, tile_size, num_candidates)
 
-            process_tile_cpu[TILE_SIZE](
+            process_tile_cpu[tile_size](
                 c_tile, c_tile, b_tile,
-                i_start, k_start, i_start, k_start, k_start, k_start,
-                num_candidates, TILE_SIZE
+                i_start, k_start, k_start, k_start,
+                num_candidates, tile_size
             )
 
-            copy_buffer_to_tile(c_tile, strongest_paths.data, i_start, k_start, i_size, num_candidates)
+            copy_buffer_to_tile(c_tile, strongest_paths.data, i_start, k_start, tile_size, num_candidates)
 
-        parallelize[process_row_tiles](tiles_count)
+        parallelize[process_row_tiles](num_tiles)
 
         # Partially dependent phases - column tiles
         @parameter
@@ -371,80 +391,103 @@ fn compute_strongest_paths_tiled_cpu(preferences: PreferenceMatrix) raises -> St
             if j == k:
                 return
 
-            var j_start = j * TILE_SIZE
-            var j_end = min(j_start + TILE_SIZE, num_candidates)
-            var j_size = j_end - j_start
+            var j_bounds = calculate_tile_bounds(j, tile_size, num_candidates)
+            var j_start = j_bounds[0]
+            var j_size = j_bounds[2]
 
-            var c_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-            var a_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-            memset_zero(c_tile, TILE_SIZE * TILE_SIZE)
-            memset_zero(a_tile, TILE_SIZE * TILE_SIZE)
+            var c_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            var a_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            memset_zero(c_tile, tile_size * tile_size)
+            memset_zero(a_tile, tile_size * tile_size)
 
-            copy_tile_to_buffer(strongest_paths.data, c_tile, k_start, j_start, j_size, num_candidates)
-            copy_tile_to_buffer(strongest_paths.data, a_tile, k_start, k_start, k_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, c_tile, k_start, j_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, a_tile, k_start, k_start, tile_size, num_candidates)
 
-            process_tile_cpu[TILE_SIZE](
+            process_tile_cpu[tile_size](
                 c_tile, a_tile, c_tile,
-                k_start, j_start, k_start, k_start, k_start, j_start,
-                num_candidates, TILE_SIZE
+                k_start, j_start, k_start, j_start,
+                num_candidates, tile_size
             )
 
-            copy_buffer_to_tile(c_tile, strongest_paths.data, k_start, j_start, j_size, num_candidates)
+            copy_buffer_to_tile(c_tile, strongest_paths.data, k_start, j_start, tile_size, num_candidates)
 
-        parallelize[process_col_tiles](tiles_count)
+        parallelize[process_col_tiles](num_tiles)
 
         # Independent phase
         @parameter
         fn process_independent_tiles(idx: Int):
-            var i = idx // tiles_count
-            var j = idx % tiles_count
+            var i = idx // num_tiles
+            var j = idx % num_tiles
 
             if i == k or j == k:
                 return
 
-            var i_start = i * TILE_SIZE
-            var i_end = min(i_start + TILE_SIZE, num_candidates)
-            var i_size = i_end - i_start
+            var i_bounds = calculate_tile_bounds(i, tile_size, num_candidates)
+            var i_start = i_bounds[0]
+            var i_size = i_bounds[2]
 
-            var j_start = j * TILE_SIZE
-            var j_end = min(j_start + TILE_SIZE, num_candidates)
-            var j_size = j_end - j_start
+            var j_bounds = calculate_tile_bounds(j, tile_size, num_candidates)
+            var j_start = j_bounds[0]
+            var j_size = j_bounds[2]
 
-            var c_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-            var a_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-            var b_tile = stack_allocation[TILE_SIZE * TILE_SIZE, UInt32]()
-            memset_zero(c_tile, TILE_SIZE * TILE_SIZE)
-            memset_zero(a_tile, TILE_SIZE * TILE_SIZE)
-            memset_zero(b_tile, TILE_SIZE * TILE_SIZE)
+            var c_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            var a_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            var b_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            memset_zero(c_tile, tile_size * tile_size)
+            memset_zero(a_tile, tile_size * tile_size)
+            memset_zero(b_tile, tile_size * tile_size)
 
-            copy_tile_to_buffer(strongest_paths.data, c_tile, i_start, j_start, min(i_size, j_size), num_candidates)
-            copy_tile_to_buffer(strongest_paths.data, a_tile, i_start, k_start, i_size, num_candidates)
-            copy_tile_to_buffer(strongest_paths.data, b_tile, k_start, j_start, j_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, c_tile, i_start, j_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, a_tile, i_start, k_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, b_tile, k_start, j_start, tile_size, num_candidates)
 
-            process_tile_cpu[TILE_SIZE](
+            process_tile_cpu[tile_size](
                 c_tile, a_tile, b_tile,
-                i_start, j_start, i_start, k_start, k_start, j_start,
-                num_candidates, TILE_SIZE
+                i_start, j_start, k_start, j_start,
+                num_candidates, tile_size
             )
 
-            copy_buffer_to_tile(c_tile, strongest_paths.data, i_start, j_start, min(i_size, j_size), num_candidates)
+            copy_buffer_to_tile(c_tile, strongest_paths.data, i_start, j_start, tile_size, num_candidates)
 
-        parallelize[process_independent_tiles](tiles_count * tiles_count)
+        parallelize[process_independent_tiles](num_tiles * num_tiles)
 
     return strongest_paths^
 
-fn get_winner_and_ranking(candidates: List[Int], strongest_paths: StrongestPathsMatrix) -> (Int, List[Int]):
+fn compute_strongest_paths_tiled_cpu_dispatch(preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
+    """
+    Runtime dispatcher for CPU tiled implementation.
+    Pre-compiles variants for allowed tile sizes and dispatches based on runtime value.
+
+    Allowed tile sizes: 8, 16, 32
+    """
+    @parameter
+    for i in range(3):
+        @parameter
+        if i == 0:
+            alias allowed_size = 8
+        elif i == 1:
+            alias allowed_size = 16
+        else:
+            alias allowed_size = 32
+
+        if tile_size == allowed_size:
+            return compute_strongest_paths_tiled_cpu[allowed_size](preferences)
+
+    # Fallback for unsupported sizes
+    print("Warning: Unsupported CPU tile size", tile_size, "- falling back to default", DEFAULT_CPU_TILE_SIZE)
+    return compute_strongest_paths_tiled_cpu[DEFAULT_CPU_TILE_SIZE](preferences)
+
+fn get_winner_and_ranking(strongest_paths: StrongestPathsMatrix) -> (Int, List[Int]):
     """
     Determines the winner and ranking based on strongest paths matrix.
 
     Args:
-        candidates: List of candidate identifiers.
         strongest_paths: Computed strongest paths matrix.
 
     Returns:
-        Tuple of (winner_index, ranked_candidates).
+        Tuple of (winner_candidate_id, ranked_candidate_ids).
     """
-    var num_candidates = len(candidates)
+    var num_candidates = strongest_paths.num_candidates
     var wins = List[Int]()
     wins.resize(num_candidates, 0)
 
@@ -464,7 +507,7 @@ fn get_winner_and_ranking(candidates: List[Int], strongest_paths: StrongestPaths
             max_wins = wins[i]
             winner_idx = i
 
-    # Create ranking by sorting candidates by win count
+    # Create ranking by sorting candidates by win count (O(n²) selection sort)
     var ranking = List[Int]()
     var used = List[Bool]()
     used.resize(num_candidates, False)
@@ -480,10 +523,10 @@ fn get_winner_and_ranking(candidates: List[Int], strongest_paths: StrongestPaths
                 best_idx = i
 
         if best_idx >= 0:
-            ranking.append(candidates[best_idx])
+            ranking.append(best_idx)
             used[best_idx] = True
 
-    return (candidates[winner_idx], ranking^)
+    return (winner_idx, ranking^)
 
 fn generate_random_preferences(num_candidates: Int, num_voters: Int) -> PreferenceMatrix:
     """
@@ -498,11 +541,14 @@ fn generate_random_preferences(num_candidates: Int, num_voters: Int) -> Preferen
     """
     var preferences = PreferenceMatrix(num_candidates)
 
-    # Fast path: directly generate random preference matrix
+    # Fast path: directly generate random preference matrix (parallelized)
     if num_voters == 0:
-        for i in range(num_candidates):
+        @parameter
+        fn fill_row(i: Int):
             for j in range(num_candidates):
                 preferences[i, j] = UInt32(random_si64(0, num_candidates))
+
+        parallelize[fill_row](num_candidates)
         return preferences^
 
     # Slow path: generate from voter rankings
@@ -856,7 +902,7 @@ fn gpu_independent_kernel[tile_size: Int](
     # Write back result
     graph[i * tile_size * n + j * tile_size + bi * n + bj] = c_shared[bi * tile_size + bj]
 
-fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+fn compute_strongest_paths_gpu[tile_size: Int = DEFAULT_GPU_TILE_SIZE](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
     """
     Pure Mojo GPU implementation of Schulze strongest paths computation.
 
@@ -909,10 +955,10 @@ fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatri
     var graph_ptr = device_graph.unsafe_ptr()
 
     # Step 6: Execute tiled Floyd-Warshall on GPU
-    var tiles_count = (num_candidates + tile_size - 1) // tile_size
+    var num_tiles = (num_candidates + tile_size - 1) // tile_size
     var block_dim_tuple = (tile_size, tile_size, 1)
 
-    for k in range(tiles_count):
+    for k in range(num_tiles):
         # Phase 1: Diagonal tile (sequential, 1 block)
         ctx.enqueue_function[gpu_diagonal_kernel[tile_size]](
             graph_ptr, num_candidates, k,
@@ -920,17 +966,17 @@ fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatri
             block_dim=block_dim_tuple
         )
 
-        # Phase 2: Partially independent tiles (tiles_count blocks)
+        # Phase 2: Partially independent tiles (num_tiles blocks)
         ctx.enqueue_function[gpu_partially_independent_kernel[tile_size]](
             graph_ptr, num_candidates, k,
-            grid_dim=(tiles_count, 1, 1),
+            grid_dim=(num_tiles, 1, 1),
             block_dim=block_dim_tuple
         )
 
-        # Phase 3: Independent tiles (tiles_count x tiles_count blocks)
+        # Phase 3: Independent tiles (num_tiles x num_tiles blocks)
         ctx.enqueue_function[gpu_independent_kernel[tile_size]](
             graph_ptr, num_candidates, k,
-            grid_dim=(tiles_count, tiles_count, 1),
+            grid_dim=(num_tiles, num_tiles, 1),
             block_dim=block_dim_tuple
         )
 
@@ -950,9 +996,27 @@ fn compute_strongest_paths_gpu[tile_size: Int = 32](preferences: PreferenceMatri
 
     return result^
 
-fn compute_strongest_paths_gpu_wrapper(preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
-    """Non-parametric wrapper for compute_strongest_paths_gpu with tile_size=32."""
-    return compute_strongest_paths_gpu[32](preferences)
+fn compute_strongest_paths_gpu_dispatch(preferences: PreferenceMatrix, tile_size: Int) raises -> StrongestPathsMatrix:
+    """
+    Runtime dispatcher for GPU implementation.
+    Pre-compiles variants for allowed tile sizes and dispatches based on runtime value.
+
+    Allowed tile sizes: 16, 32
+    """
+    @parameter
+    for i in range(2):
+        @parameter
+        if i == 0:
+            alias allowed_size = 16
+        else:
+            alias allowed_size = 32
+
+        if tile_size == allowed_size:
+            return compute_strongest_paths_gpu[allowed_size](preferences)
+
+    # Fallback for unsupported sizes
+    print("Warning: Unsupported GPU tile size", tile_size, "- falling back to default", DEFAULT_GPU_TILE_SIZE)
+    return compute_strongest_paths_gpu[DEFAULT_GPU_TILE_SIZE](preferences)
 
 fn validate_results(result: StrongestPathsMatrix, baseline: StrongestPathsMatrix) -> Bool:
     """Check if two results match."""
@@ -962,13 +1026,6 @@ fn validate_results(result: StrongestPathsMatrix, baseline: StrongestPathsMatrix
             if result[i, j] != baseline[i, j]:
                 return False
     return True
-
-fn compute_winner(num_candidates: Int, result: StrongestPathsMatrix) -> (Int, List[Int]):
-    """Compute winner and ranking from result matrix."""
-    var candidates = List[Int]()
-    for i in range(num_candidates):
-        candidates.append(i)
-    return get_winner_and_ranking(candidates, result)
 
 fn parse_int_arg[origin: Origin](args: VariadicList[StringSlice[origin]], flag: String, default: Int) -> Int:
     """Parse an integer command-line argument."""
@@ -999,8 +1056,8 @@ fn print_usage():
     print("  --run-cpu             Run CPU implementations")
     print("  --run-gpu             Run GPU implementation")
     print("  --no-serial           Skip serial baseline")
-    print("  --cpu-tile-size N     CPU tile size (default: 16)")
-    print("  --gpu-tile-size N     GPU tile size (default: 32)")
+    print("  --cpu-tile-size N     CPU tile size: 8, 16, 32 (default: 16)")
+    print("  --gpu-tile-size N     GPU tile size: 16, 32 (default: 32)")
     print("  --warmup N            Number of warmup iterations (default: 1)")
     print("  --repeat N            Number of benchmark iterations (default: 1)")
     print("  --help, -h            Show this help message")
@@ -1009,6 +1066,7 @@ fn print_usage():
     print("  pixi run mojo scaling_elections.mojo --num-candidates 256 --num-voters 4000")
     print("  pixi run mojo scaling_elections.mojo --num-candidates 4096 --run-cpu --run-gpu")
     print("  pixi run mojo scaling_elections.mojo --num-candidates 16384 --num-voters 0 --run-gpu --no-serial")
+    print("  pixi run mojo scaling_elections.mojo --run-cpu --cpu-tile-size 32")
 
 fn main():
     """
@@ -1026,8 +1084,8 @@ fn main():
     # Parse command-line arguments
     var num_candidates = parse_int_arg(args, "--num-candidates", 128)
     var num_voters = parse_int_arg(args, "--num-voters", 2000)
-    var cpu_tile_size = parse_int_arg(args, "--cpu-tile-size", TILE_SIZE)
-    var gpu_tile_size = parse_int_arg(args, "--gpu-tile-size", 32)
+    var cpu_tile_size = parse_int_arg(args, "--cpu-tile-size", DEFAULT_CPU_TILE_SIZE)
+    var gpu_tile_size = parse_int_arg(args, "--gpu-tile-size", DEFAULT_GPU_TILE_SIZE)
     var warmup = parse_int_arg(args, "--warmup", 1)
     var repeat = parse_int_arg(args, "--repeat", 1)
     var run_cpu = has_flag(args, "--run-cpu")
@@ -1046,14 +1104,15 @@ fn main():
             run_gpu = False
 
     # Validate CPU tile size
-    if cpu_tile_size != TILE_SIZE:
-        print("Warning: --cpu-tile-size must match compiled TILE_SIZE (" + String(TILE_SIZE) + ")")
+    if cpu_tile_size not in (8, 16, 32):
+        print("Warning: --cpu-tile-size must be 8, 16, or 32. Using default:", DEFAULT_CPU_TILE_SIZE)
+        cpu_tile_size = DEFAULT_CPU_TILE_SIZE
         print()
 
     # Validate GPU tile size
-    if run_gpu and gpu_tile_size not in (4, 8, 16, 32):
-        print("Warning: --gpu-tile-size must be 4, 8, 16, or 32. Using default: 32")
-        gpu_tile_size = 32
+    if run_gpu and gpu_tile_size not in (16, 32):
+        print("Warning: --gpu-tile-size must be 16 or 32. Using default:", DEFAULT_GPU_TILE_SIZE)
+        gpu_tile_size = DEFAULT_GPU_TILE_SIZE
         print()
 
     # Validate candidates (must be at least 4)
@@ -1064,7 +1123,7 @@ fn main():
     print("Configuration:")
     var voters_str = String(num_voters) + " voters" if num_voters > 0 else "random"
     print("  Problem size: " + String(num_candidates) + " candidates × " + voters_str)
-    print("  CPU tile: " + String(TILE_SIZE) + " × " + String(TILE_SIZE))
+    print("  CPU tile: " + String(cpu_tile_size) + " × " + String(cpu_tile_size))
     if run_gpu:
         print("  GPU tile: " + String(gpu_tile_size) + " × " + String(gpu_tile_size))
     print("  Warmup: " + String(warmup) + ", Repeat: " + String(repeat))
@@ -1101,7 +1160,7 @@ fn main():
                 print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
 
             has_baseline = True
-            var result_tuple = compute_winner(num_candidates, baseline)
+            var result_tuple = get_winner_and_ranking(baseline)
             winner = result_tuple[0]
             ranking = result_tuple[1].copy()
             has_winner = True
@@ -1114,10 +1173,31 @@ fn main():
     if run_cpu:
         try:
             print("→ Tiled CPU (Mojo)")
-            run_warmup(compute_strongest_paths_tiled_cpu, preferences, warmup)
 
+            # Warmup
+            for i in range(warmup):
+                var start_time = perf_counter_ns()
+                _ = compute_strongest_paths_tiled_cpu_dispatch(preferences, cpu_tile_size)
+                var elapsed_ns = perf_counter_ns() - start_time
+                if warmup > 1:
+                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
+                else:
+                    print("  Warm-up: " + format_time(elapsed_ns))
+
+            # Benchmark runs
+            var times = List[Int]()
             var cpu_result = StrongestPathsMatrix(0)
-            var avg_time = run_and_average(compute_strongest_paths_tiled_cpu, preferences, repeat, cpu_result)
+            for _ in range(repeat):
+                var start_time = perf_counter_ns()
+                cpu_result = compute_strongest_paths_tiled_cpu_dispatch(preferences, cpu_tile_size)
+                var elapsed_ns = perf_counter_ns() - start_time
+                times.append(elapsed_ns)
+
+            # Calculate average
+            var total_time: Int = 0
+            for i in range(len(times)):
+                total_time += times[i]
+            var avg_time = total_time // repeat
 
             if repeat > 1:
                 print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
@@ -1130,7 +1210,7 @@ fn main():
                 print("  ✗ Results don't match baseline!")
 
             if not has_winner:
-                var result_tuple = compute_winner(num_candidates, cpu_result)
+                var result_tuple = get_winner_and_ranking(cpu_result)
                 winner = result_tuple[0]
                 ranking = result_tuple[1].copy()
                 has_winner = True
@@ -1144,10 +1224,31 @@ fn main():
     if run_gpu:
         try:
             print("→ Tiled GPU (Mojo)")
-            run_warmup(compute_strongest_paths_gpu_wrapper, preferences, warmup)
 
+            # Warmup
+            for i in range(warmup):
+                var start_time = perf_counter_ns()
+                _ = compute_strongest_paths_gpu_dispatch(preferences, gpu_tile_size)
+                var elapsed_ns = perf_counter_ns() - start_time
+                if warmup > 1:
+                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
+                else:
+                    print("  Warm-up: " + format_time(elapsed_ns))
+
+            # Benchmark runs
+            var times = List[Int]()
             var gpu_result = StrongestPathsMatrix(0)
-            var avg_time = run_and_average(compute_strongest_paths_gpu_wrapper, preferences, repeat, gpu_result)
+            for _ in range(repeat):
+                var start_time = perf_counter_ns()
+                gpu_result = compute_strongest_paths_gpu_dispatch(preferences, gpu_tile_size)
+                var elapsed_ns = perf_counter_ns() - start_time
+                times.append(elapsed_ns)
+
+            # Calculate average
+            var total_time: Int = 0
+            for i in range(len(times)):
+                total_time += times[i]
+            var avg_time = total_time // repeat
 
             if repeat > 1:
                 print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
@@ -1160,7 +1261,7 @@ fn main():
                 print("  ✗ Results don't match baseline!")
 
             if not has_winner:
-                var result_tuple = compute_winner(num_candidates, gpu_result)
+                var result_tuple = get_winner_and_ranking(gpu_result)
                 winner = result_tuple[0]
                 ranking = result_tuple[1].copy()
                 has_winner = True
@@ -1174,7 +1275,7 @@ fn main():
     if not has_winner:
         try:
             var fallback = compute_strongest_paths_serial(preferences)
-            var result_tuple = compute_winner(num_candidates, fallback)
+            var result_tuple = get_winner_and_ranking(fallback)
             winner = result_tuple[0]
             ranking = result_tuple[1].copy()
         except e:
