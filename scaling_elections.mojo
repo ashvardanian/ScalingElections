@@ -50,20 +50,22 @@ from time import perf_counter_ns
 
 # GPU acceleration
 from buffer import NDBuffer
+from layout import Layout, LayoutTensor
+
+# TODO: Find a good way to feature-gate GPU code for CPU-only machines
 from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
 from gpu.id import block_idx, thread_idx, block_dim, global_idx
 from gpu.sync import barrier
-from layout import Layout, LayoutTensor
 
 # Type aliases for clarity
 alias VotesCount = UInt32
 alias CandidateIdx = Int
 
 # ! Tile sizes control cache utilization and parallelism efficiency.
-# ! CPU: 16x16 fits L1 cache (typical 32KB), balances reuse vs overhead.
+# ! CPU: 32x32 fits L2 cache and simplifies AVX-512.
 # ! GPU: 32x32 matches NVIDIA warp size (32 threads), maximizes occupancy.
 # ! Pre-compiled variants allow runtime selection without JIT overhead.
-alias DEFAULT_CPU_TILE_SIZE = 16
+alias DEFAULT_CPU_TILE_SIZE = 32
 alias DEFAULT_GPU_TILE_SIZE = 32
 alias ALLOWED_CPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64, 96, 128)
 alias ALLOWED_GPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64)

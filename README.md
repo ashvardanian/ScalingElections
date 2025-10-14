@@ -77,13 +77,13 @@ pixi run mojo build scaling_elections.mojo -o schulze
 
 ## Throughput
 
-| Candidates | Numba, `384vCPU` | Mojo, `384vCPU` |    CUDA, `h100` |    Mojo, `h100` |
-| :--------- | ---------------: | --------------: | --------------: | --------------: |
-| 2'048      |   34.4 Gcells³/s |  48.5 Gcells³/s | 182.7 Gcells³/s | 153.4 Gcells³/s |
-| 4'096      |   86.8 Gcells³/s |  50.3 Gcells³/s | 264.1 Gcells³/s | 232.6 Gcells³/s |
-| 8'192      |   74.6 Gcells³/s |  71.6 Gcells³/s | 495.3 Gcells³/s | 408.0 Gcells³/s |
-| 16'384     |   76.7 Gcells³/s |  78.5 Gcells³/s | 600.7 Gcells³/s | 635.3 Gcells³/s |
-| 32'768     |  101.4 Gcells³/s |  82.3 Gcells³/s | 921.4 Gcells³/s | 893.7 Gcells³/s |
+| Candidates |   Numba, `384c` | Mojo 🔥, `384c` | Mojo 🔥 SIMD, `384c` |    CUDA, `h100` |  Mojo 🔥, `h100` |
+| :--------- | --------------: | -------------: | ------------------: | --------------: | --------------: |
+| 2'048      |  34.4 Gcells³/s | 37.9 Gcells³/s |      62.1 Gcells³/s | 182.7 Gcells³/s | 153.4 Gcells³/s |
+| 4'096      |  86.8 Gcells³/s | 59.8 Gcells³/s |     171.5 Gcells³/s | 264.1 Gcells³/s | 232.6 Gcells³/s |
+| 8'192      |  74.6 Gcells³/s | 76.6 Gcells³/s |     357.3 Gcells³/s | 495.3 Gcells³/s | 408.0 Gcells³/s |
+| 16'384     |  76.7 Gcells³/s | 80.7 Gcells³/s |     369.0 Gcells³/s | 600.7 Gcells³/s | 635.3 Gcells³/s |
+| 32'768     | 101.4 Gcells³/s | 82.3 Gcells³/s |     293.1 Gcells³/s | 921.4 Gcells³/s | 893.7 Gcells³/s |
 
 ---
 
