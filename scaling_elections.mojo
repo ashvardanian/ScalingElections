@@ -45,7 +45,7 @@ from builtin.sort import sort
 from random import random_si64
 
 # System and runtime
-from sys import argv, has_accelerator
+from sys import argv, has_accelerator, simdwidthof
 from time import perf_counter_ns
 
 # GPU acceleration
@@ -59,15 +59,13 @@ from layout import Layout, LayoutTensor
 alias VotesCount = UInt32
 alias CandidateIdx = Int
 
-# Tile sizes for blocking optimization - tuned for each architecture
-alias DEFAULT_CPU_TILE_SIZE = 16  # Optimized for CPU cache
-alias DEFAULT_GPU_TILE_SIZE = 32  # Optimized for GPU warp size
-
-# Allowed tile sizes for runtime selection (compile-time pre-compiled variants)
-# CPU: Optimized for cache line sizes (64 bytes) and L1/L2 cache
+# ! Tile sizes control cache utilization and parallelism efficiency.
+# ! CPU: 16x16 fits L1 cache (typical 32KB), balances reuse vs overhead.
+# ! GPU: 32x32 matches NVIDIA warp size (32 threads), maximizes occupancy.
+# ! Pre-compiled variants allow runtime selection without JIT overhead.
+alias DEFAULT_CPU_TILE_SIZE = 16
+alias DEFAULT_GPU_TILE_SIZE = 32
 alias ALLOWED_CPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64, 96, 128)
-# GPU: Aligned with warp sizes - NVIDIA (32) and AMD (64)
-# Block dimensions: 8x8=64, 16x16=256, 32x32=1024 threads
 alias ALLOWED_GPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64)
 
 @fieldwise_init
@@ -283,6 +281,152 @@ fn process_tile_cpu[tile_size: Int](
                 var c_val = c[c_idx]
                 var new_val = min(a_val, b_val)
 
+                if new_val > c_val:
+                    c[c_idx] = new_val
+
+# =============================================================================
+# SIMD-VECTORIZED CPU TILE PROCESSORS FOR SCHULZE VOTING ALGORITHM
+# =============================================================================
+#
+# Three-phase specialized tile processors using SIMD for vectorization
+# Mirrors GPU's phase-specific design but uses SIMD vectors instead of threads
+# =============================================================================
+
+fn process_tile_cpu_simd_independent[tile_size: Int, simd_width: Int](
+    c: UnsafePointer[UInt32],
+    a: UnsafePointer[UInt32],
+    b: UnsafePointer[UInt32],
+    tile_stride: Int
+):
+    """
+    SIMD-vectorized tile processor for independent tiles (no diagonal checking needed).
+    Processes multiple elements along the j dimension using SIMD vectors.
+
+    Args:
+        c: Output tile.
+        a: First input tile.
+        b: Second input tile.
+        tile_stride: Stride for accessing tiles.
+    """
+    # Process k loop over intermediate values
+    for k in range(tile_size):
+        # Process each row
+        for bi in range(tile_size):
+            var a_val = a[bi * tile_stride + k]
+
+            # Vectorized processing of columns (j dimension)
+            var num_simd_chunks = tile_size // simd_width
+
+            # Process full SIMD chunks
+            for chunk in range(num_simd_chunks):
+                var bj = chunk * simd_width
+                var c_base_idx = bi * tile_stride + bj
+                var b_base_idx = k * tile_stride + bj
+
+                # Load SIMD vectors
+                var c_vec = c.load[width=simd_width](c_base_idx)
+                var b_vec = b.load[width=simd_width](b_base_idx)
+
+                # Broadcast a_val to SIMD vector
+                var a_vec = SIMD[DType.uint32, simd_width](a_val)
+
+                # Compute min(a, b) and max(c, min_val)
+                var min_val = min(a_vec, b_vec)
+                var new_c = max(c_vec, min_val)
+
+                # Store result
+                c.store[width=simd_width](c_base_idx, new_c)
+
+            # Handle remainder elements (scalar fallback)
+            for bj in range(num_simd_chunks * simd_width, tile_size):
+                var c_idx = bi * tile_stride + bj
+                var b_val = b[k * tile_stride + bj]
+                var c_val = c[c_idx]
+                var new_val = min(a_val, b_val)
+                if new_val > c_val:
+                    c[c_idx] = new_val
+
+fn process_tile_cpu_simd_diagonal[tile_size: Int, simd_width: Int](
+    c: UnsafePointer[UInt32],
+    a: UnsafePointer[UInt32],
+    b: UnsafePointer[UInt32],
+    c_row: Int,
+    c_col: Int,
+    a_col: Int,
+    num_candidates: Int,
+    tile_stride: Int
+):
+    """
+    SIMD-vectorized tile processor for diagonal tiles (requires diagonal avoidance).
+    Uses masking and select operations to avoid branches.
+
+    Args:
+        c: Output tile.
+        a: First input tile.
+        b: Second input tile.
+        c_row: Global row index of output tile.
+        c_col: Global column index of output tile.
+        a_col: Global column index for intermediate dimension.
+        num_candidates: Total number of candidates.
+        tile_stride: Stride for accessing tiles.
+    """
+    # Process k loop
+    for k in range(tile_size):
+        var global_k = a_col + k
+
+        # Process each row
+        for bi in range(tile_size):
+            var global_i = c_row + bi
+            var a_val = a[bi * tile_stride + k]
+
+            # Vectorized processing with diagonal masking
+            var num_simd_chunks = tile_size // simd_width
+
+            # Process full SIMD chunks
+            for chunk in range(num_simd_chunks):
+                var bj = chunk * simd_width
+                var c_base_idx = bi * tile_stride + bj
+                var b_base_idx = k * tile_stride + bj
+
+                # Load SIMD vectors
+                var c_vec = c.load[width=simd_width](c_base_idx)
+                var b_vec = b.load[width=simd_width](b_base_idx)
+                var a_vec = SIMD[DType.uint32, simd_width](a_val)
+
+                # Compute candidate new values
+                var min_val = min(a_vec, b_vec)
+
+                # Build diagonal mask (branchless)
+                var mask = SIMD[DType.bool, simd_width]()
+                @parameter
+                fn compute_mask[width: Int]():
+                    for lane in range(width):
+                        var global_j = c_col + bj + lane
+                        # Allow update if: not on diagonal AND new_val > old_val
+                        var not_diag_c = global_i != global_j
+                        var not_diag_a = global_i != global_k
+                        var not_diag_b = global_k != global_j
+                        var is_bigger = min_val[lane] > c_vec[lane]
+                        mask[lane] = not_diag_c and not_diag_a and not_diag_b and is_bigger
+
+                compute_mask[simd_width]()
+
+                # Conditional update using select (mask ? min_val : c_vec)
+                var new_c = mask.select(min_val, c_vec)
+                c.store[width=simd_width](c_base_idx, new_c)
+
+            # Handle remainder elements
+            for bj in range(num_simd_chunks * simd_width, tile_size):
+                var global_j = c_col + bj
+
+                # Skip diagonal elements
+                if global_i == global_j or global_i == global_k or global_k == global_j:
+                    continue
+
+                var c_idx = bi * tile_stride + bj
+                var b_val = b[k * tile_stride + bj]
+                var c_val = c[c_idx]
+                var new_val = min(a_val, b_val)
                 if new_val > c_val:
                     c[c_idx] = new_val
 
@@ -518,6 +662,156 @@ fn compute_strongest_paths_tiled_cpu_dispatch[*allowed_sizes: Int](preferences: 
     # Fallback for unsupported sizes
     print("Warning: Unsupported CPU tile size", tile_size, "- falling back to default", DEFAULT_CPU_TILE_SIZE)
     return compute_strongest_paths_tiled_cpu[DEFAULT_CPU_TILE_SIZE](preferences)
+
+fn compute_strongest_paths_tiled_cpu_simd[tile_size: Int = DEFAULT_CPU_TILE_SIZE](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    """
+    SIMD-vectorized tiled CPU implementation of Schulze strongest paths computation.
+    Uses phase-specific SIMD tile processors for optimal vectorization and minimal branching.
+
+    Parameters:
+        tile_size: Compile-time tile size for CPU processing (default: 16).
+
+    Args:
+        preferences: Input preference matrix.
+
+    Returns:
+        StrongestPathsMatrix with computed strongest paths.
+    """
+    # Use SIMD width of 8 for uint32 (works on AVX2/AVX-512)
+    alias simd_width = 8
+    var num_candidates = preferences.num_candidates
+    var strongest_paths = StrongestPathsMatrix(num_candidates)
+
+    # Step 1: Initialize strongest paths (same as regular CPU version)
+    @parameter
+    fn init_paths(i: Int):
+        for j in range(num_candidates):
+            if i != j:
+                var pref_ij = preferences[i, j]
+                var pref_ji = preferences[j, i]
+                if pref_ij > pref_ji:
+                    strongest_paths[i, j] = pref_ij
+                else:
+                    strongest_paths[i, j] = 0
+
+    parallelize[init_paths](num_candidates)
+
+    # Step 2: SIMD-vectorized tiled Floyd-Warshall computation
+    var num_tiles = (num_candidates + tile_size - 1) // tile_size
+
+    for k in range(num_tiles):
+        var k_bounds = calculate_tile_bounds(k, tile_size, num_candidates)
+        var k_start = k_bounds[0]
+
+        # Diagonal phase: uses diagonal-aware SIMD processor
+        var diagonal_tile = stack_allocation[tile_size * tile_size, UInt32]()
+        memset_zero(diagonal_tile, tile_size * tile_size)
+
+        copy_tile_to_buffer(
+            strongest_paths.data, diagonal_tile,
+            k_start, k_start, tile_size, num_candidates
+        )
+
+        process_tile_cpu_simd_diagonal[tile_size, simd_width](
+            diagonal_tile, diagonal_tile, diagonal_tile,
+            k_start, k_start, k_start,
+            num_candidates, tile_size
+        )
+
+        copy_buffer_to_tile(
+            diagonal_tile, strongest_paths.data,
+            k_start, k_start, tile_size, num_candidates
+        )
+
+        # Partially dependent phases - row and column tiles
+        @parameter
+        fn process_row_col_tiles(i: Int):
+            if i == k:
+                return
+
+            var i_bounds = calculate_tile_bounds(i, tile_size, num_candidates)
+            var i_start = i_bounds[0]
+
+            # Row tile (i, k)
+            var c_tile_row = stack_allocation[tile_size * tile_size, UInt32]()
+            var b_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            memset_zero(c_tile_row, tile_size * tile_size)
+            memset_zero(b_tile, tile_size * tile_size)
+
+            copy_tile_to_buffer(strongest_paths.data, c_tile_row, i_start, k_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, b_tile, k_start, k_start, tile_size, num_candidates)
+
+            process_tile_cpu_simd_diagonal[tile_size, simd_width](
+                c_tile_row, c_tile_row, b_tile,
+                i_start, k_start, k_start,
+                num_candidates, tile_size
+            )
+
+            copy_buffer_to_tile(c_tile_row, strongest_paths.data, i_start, k_start, tile_size, num_candidates)
+
+            # Column tile (k, i)
+            var c_tile_col = stack_allocation[tile_size * tile_size, UInt32]()
+            var a_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            memset_zero(c_tile_col, tile_size * tile_size)
+            memset_zero(a_tile, tile_size * tile_size)
+
+            copy_tile_to_buffer(strongest_paths.data, c_tile_col, k_start, i_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, a_tile, k_start, k_start, tile_size, num_candidates)
+
+            process_tile_cpu_simd_diagonal[tile_size, simd_width](
+                c_tile_col, a_tile, c_tile_col,
+                k_start, i_start, k_start,
+                num_candidates, tile_size
+            )
+
+            copy_buffer_to_tile(c_tile_col, strongest_paths.data, k_start, i_start, tile_size, num_candidates)
+
+        parallelize[process_row_col_tiles](num_tiles)
+
+        # Independent phase: uses fast SIMD processor (no diagonal checks)
+        @parameter
+        fn process_independent_tiles(idx: Int):
+            var i = idx // num_tiles
+            var j = idx % num_tiles
+
+            if i == k or j == k:
+                return
+
+            var i_bounds = calculate_tile_bounds(i, tile_size, num_candidates)
+            var i_start = i_bounds[0]
+
+            var j_bounds = calculate_tile_bounds(j, tile_size, num_candidates)
+            var j_start = j_bounds[0]
+
+            var c_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            var a_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            var b_tile = stack_allocation[tile_size * tile_size, UInt32]()
+            memset_zero(c_tile, tile_size * tile_size)
+            memset_zero(a_tile, tile_size * tile_size)
+            memset_zero(b_tile, tile_size * tile_size)
+
+            copy_tile_to_buffer(strongest_paths.data, c_tile, i_start, j_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, a_tile, i_start, k_start, tile_size, num_candidates)
+            copy_tile_to_buffer(strongest_paths.data, b_tile, k_start, j_start, tile_size, num_candidates)
+
+            # Use independent processor if not on diagonal, otherwise use diagonal processor
+            if i == j:
+                process_tile_cpu_simd_diagonal[tile_size, simd_width](
+                    c_tile, a_tile, b_tile,
+                    i_start, j_start, k_start,
+                    num_candidates, tile_size
+                )
+            else:
+                process_tile_cpu_simd_independent[tile_size, simd_width](
+                    c_tile, a_tile, b_tile,
+                    tile_size
+                )
+
+            copy_buffer_to_tile(c_tile, strongest_paths.data, i_start, j_start, tile_size, num_candidates)
+
+        parallelize[process_independent_tiles](num_tiles * num_tiles)
+
+    return strongest_paths^
 
 fn get_winner_and_ranking(strongest_paths: StrongestPathsMatrix) -> (Int, List[Int]):
     """
@@ -1093,7 +1387,7 @@ fn print_usage():
     print("  --num-candidates N    Number of candidates (default: 128)")
     print("  --num-voters N        Number of voters (default: 2000)")
     print("                        Set to 0 for instant random preference matrix generation")
-    print("  --run-cpu             Run CPU implementations")
+    print("  --run-cpu             Run CPU implementations (tiled + SIMD-vectorized)")
     print("  --run-gpu             Run GPU implementation")
     print("  --no-serial           Skip serial baseline")
     print("  --cpu-tile-size N     CPU tile size: 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 (default: 16)")
@@ -1260,6 +1554,57 @@ fn main():
             print()
         except e:
             print("  ✗ CPU failed: " + String(e))
+            print()
+
+    # Run SIMD CPU implementation
+    if run_cpu:
+        try:
+            print("→ Tiled CPU+SIMD (Mojo)")
+
+            # Warmup
+            for i in range(warmup):
+                var start_time = perf_counter_ns()
+                _ = compute_strongest_paths_tiled_cpu_simd[DEFAULT_CPU_TILE_SIZE](preferences)
+                var elapsed_ns = perf_counter_ns() - start_time
+                if warmup > 1:
+                    print("  Warm-up " + String(i+1) + "/" + String(warmup) + ": " + format_time(elapsed_ns))
+                else:
+                    print("  Warm-up: " + format_time(elapsed_ns))
+
+            # Benchmark runs
+            var times = List[Int]()
+            var cpu_simd_result = StrongestPathsMatrix(0)
+            for _ in range(repeat):
+                var start_time = perf_counter_ns()
+                cpu_simd_result = compute_strongest_paths_tiled_cpu_simd[DEFAULT_CPU_TILE_SIZE](preferences)
+                var elapsed_ns = perf_counter_ns() - start_time
+                times.append(elapsed_ns)
+
+            # Calculate average
+            var total_time: Int = 0
+            for i in range(len(times)):
+                total_time += times[i]
+            var avg_time = total_time // repeat
+
+            if repeat > 1:
+                print("  Run:     " + format_time(avg_time) + " (avg of " + String(repeat) + ") │ " + format_throughput_from_ns(avg_time, num_candidates))
+            else:
+                print("  Run:     " + format_time(avg_time) + " │ " + format_throughput_from_ns(avg_time, num_candidates))
+
+            if has_baseline and validate_results(cpu_simd_result, baseline):
+                print("  ✓ Results validated")
+            elif has_baseline:
+                print("  ✗ Results don't match baseline!")
+
+            if not has_winner:
+                var result_tuple = get_winner_and_ranking(cpu_simd_result)
+                winner = result_tuple[0]
+                ranking = result_tuple[1].copy()
+                has_winner = True
+
+            print()
+        except e:
+            print("  ✗ CPU+SIMD failed: " + String(e))
             print()
 
     # Run GPU implementation
