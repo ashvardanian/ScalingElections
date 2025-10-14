@@ -41,6 +41,7 @@ from memory import UnsafePointer, memset_zero, stack_allocation, AddressSpace
 
 # Algorithms and utilities
 from algorithm import parallelize
+from builtin.sort import sort
 from random import random_si64
 
 # System and runtime
@@ -53,7 +54,6 @@ from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
 from gpu.id import block_idx, thread_idx, block_dim, global_idx
 from gpu.sync import barrier
 from layout import Layout, LayoutTensor
-from buffer import NDBuffer
 
 # Type aliases for clarity
 alias VotesCount = UInt32
@@ -69,6 +69,31 @@ alias ALLOWED_CPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64, 96, 128)
 # GPU: Aligned with warp sizes - NVIDIA (32) and AMD (64)
 # Block dimensions: 8x8=64, 16x16=256, 32x32=1024 threads
 alias ALLOWED_GPU_TILE_SIZES = (4, 8, 12, 16, 24, 32, 48, 64)
+
+@fieldwise_init
+struct IndexedScore(Copyable, Movable, Comparable):
+    """Pairs a candidate index with their win count for sorting."""
+    var idx: Int
+    var score: Int
+
+    fn __lt__(self, other: Self) -> Bool:
+        # Sort in descending order by score (higher scores first)
+        return self.score > other.score
+
+    fn __le__(self, other: Self) -> Bool:
+        return self.score >= other.score
+
+    fn __eq__(self, other: Self) -> Bool:
+        return self.score == other.score
+
+    fn __ne__(self, other: Self) -> Bool:
+        return self.score != other.score
+
+    fn __gt__(self, other: Self) -> Bool:
+        return self.score < other.score
+
+    fn __ge__(self, other: Self) -> Bool:
+        return self.score <= other.score
 
 @fieldwise_init
 struct PreferenceMatrix(Movable):
@@ -524,24 +549,18 @@ fn get_winner_and_ranking(strongest_paths: StrongestPathsMatrix) -> (Int, List[I
             max_wins = wins[i]
             winner_idx = i
 
-    # Create ranking by sorting candidates by win count (O(n²) selection sort)
+    # Create ranking by sorting candidates by win count (O(n log n) using built-in sort)
+    var scored_candidates = List[IndexedScore]()
+    for i in range(num_candidates):
+        scored_candidates.append(IndexedScore(i, wins[i]))
+
+    # Sort by score (IndexedScore's __lt__ sorts in descending order)
+    sort(scored_candidates)
+
+    # Extract just the candidate indices
     var ranking = List[Int]()
-    var used = List[Bool]()
-    used.resize(num_candidates, False)
-
-    # Add candidates in order of decreasing wins
-    for _ in range(num_candidates):
-        var best_idx = -1
-        var best_wins = -1
-
-        for i in range(num_candidates):
-            if not used[i] and wins[i] > best_wins:
-                best_wins = wins[i]
-                best_idx = i
-
-        if best_idx >= 0:
-            ranking.append(best_idx)
-            used[best_idx] = True
+    for i in range(len(scored_candidates)):
+        ranking.append(scored_candidates[i].idx)
 
     return (winner_idx, ranking^)
 
