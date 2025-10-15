@@ -22,18 +22,52 @@
 #if defined(__NVCC__)
 #define SCALING_ELECTIONS_WITH_CUDA (1)
 #endif
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIP__)
+#define SCALING_ELECTIONS_WITH_HIP (1)
+#define SCALING_ELECTIONS_WITH_CUDA (1)  // HIP is CUDA-compatible
+#endif
 
 #if defined(SCALING_ELECTIONS_WITH_NEON)
 #include <arm_neon.h>
 #endif
 
-#if defined(SCALING_ELECTIONS_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_CUDA) && !defined(SCALING_ELECTIONS_WITH_HIP)
+// NVIDIA CUDA headers
 #include <cuda.h> // `CUtensorMap`
 #include <cuda/barrier>
 #include <cudaTypedefs.h> // `PFN_cuTensorMapEncodeTiled`
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
+#elif defined(SCALING_ELECTIONS_WITH_HIP)
+// AMD HIP headers (CUDA-compatible)
+#include <hip/hip_runtime.h>
+
+#ifdef __HIP_PLATFORM_AMD__
+// HIP compatibility layer: map CUDA types/functions to HIP equivalents
+#define cudaError_t hipError_t
+#define cudaSuccess hipSuccess
+#define cudaGetDevice hipGetDevice
+#define cudaGetDeviceProperties hipGetDeviceProperties
+#define cudaDeviceProp hipDeviceProp_t
+#define cudaMallocManaged hipMallocManaged
+#define cudaFree hipFree
+#define cudaMemcpy hipMemcpy
+#define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaMemset hipMemset
+#define cudaDeviceSynchronize hipDeviceSynchronize
+#define cudaGetLastError hipGetLastError
+#define cudaGetErrorString hipGetErrorString
+#define cudaGetDeviceCount hipGetDeviceCount
+
+// HIP provides its own thrust implementation for rocThrust (optional)
+// Note: rocThrust may need to be installed separately
+#if __has_include(<thrust/device_vector.h>)
+#include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
+#endif
+#endif
 #endif
 
 /*
@@ -47,10 +81,10 @@
 namespace py = pybind11;
 #endif
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300 && !defined(SCALING_ELECTIONS_WITH_HIP)
 #define SCALING_ELECTIONS_KEPLER (1)
 #endif
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && !defined(SCALING_ELECTIONS_WITH_HIP)
 #define SCALING_ELECTIONS_HOPPER (1)
 #endif
 
@@ -70,8 +104,10 @@ void signal_handler(int signal) { global_signal_status = signal; }
 
 #if defined(SCALING_ELECTIONS_WITH_CUDA)
 
+#if !defined(SCALING_ELECTIONS_WITH_HIP)
 namespace cde = cuda::device::experimental;
 using barrier_t = cuda::barrier<cuda::thread_scope_block>;
+#endif
 
 #if defined(SCALING_ELECTIONS_KEPLER)
 
@@ -107,7 +143,7 @@ __forceinline__ __device__ void process_tile_cuda_( //
 
     votes_count_t& c_cell = c[bi][bj];
 
-#pragma unroll(tile_size)
+#pragma unroll tile_size
     for (candidate_idx_t k = 0; k < tile_size; k++) {
         votes_count_t smallest = umin(a[bi][k], b[k][bj]);
         if constexpr (may_be_diagonal) {
@@ -158,7 +194,7 @@ __forceinline__ __device__ void process_tile_cuda_( //
 
     votes_count_t& c_cell = c[bi][bj];
 
-#pragma unroll(tile_size)
+#pragma unroll tile_size
     for (candidate_idx_t k = 0; k < tile_size; k++) {
         votes_count_t smallest = min(a[bi][k], b[k][bj]);
         if constexpr (may_be_diagonal) {
@@ -191,7 +227,7 @@ __global__ void cuda_diagonal_(candidate_idx_t n, candidate_idx_t k, votes_count
     candidate_idx_t const bi = threadIdx.y;
     candidate_idx_t const bj = threadIdx.x;
 
-    __shared__ alignas(16) votes_count_t c[tile_size][tile_size];
+    alignas(16) __shared__ votes_count_t c[tile_size][tile_size];
     c[bi][bj] = graph[k * tile_size * n + k * tile_size + bi * n + bj];
 
     __syncthreads();
@@ -222,9 +258,9 @@ __global__ void cuda_partially_independent_(candidate_idx_t n, candidate_idx_t k
     if (i == k)
         return;
 
-    __shared__ alignas(16) votes_count_tile<tile_size> a;
-    __shared__ alignas(16) votes_count_tile<tile_size> b;
-    __shared__ alignas(16) votes_count_tile<tile_size> c;
+    alignas(16) __shared__ votes_count_tile<tile_size> a;
+    alignas(16) __shared__ votes_count_tile<tile_size> b;
+    alignas(16) __shared__ votes_count_tile<tile_size> c;
 
     // Partially dependent phase (first of two)
     // Walking down within a group of adjacent columns
@@ -274,9 +310,9 @@ __global__ void cuda_independent_(candidate_idx_t n, candidate_idx_t k, votes_co
     if (i == k && j == k)
         return;
 
-    __shared__ alignas(16) votes_count_tile<tile_size> a;
-    __shared__ alignas(16) votes_count_tile<tile_size> b;
-    __shared__ alignas(16) votes_count_tile<tile_size> c;
+    alignas(16) __shared__ votes_count_tile<tile_size> a;
+    alignas(16) __shared__ votes_count_tile<tile_size> b;
+    alignas(16) __shared__ votes_count_tile<tile_size> c;
 
     c[bi][bj] = graph[i * tile_size * n + j * tile_size + bi * n + bj];
     a[bi][bj] = graph[i * tile_size * n + k * tile_size + bi * n + bj];
@@ -308,13 +344,16 @@ __global__ void cuda_independent_(candidate_idx_t n, candidate_idx_t k, votes_co
 }
 
 /**
- * @brief Performs then independent step of the block-parallel Schulze voting algorithm in CUDA or @b HIP.
+ * @brief Performs then independent step of the block-parallel Schulze voting algorithm in CUDA (NVIDIA Hopper only).
  *
  * @tparam tile_size The size of the tile to be processed.
  * @param n The number of candidates.
  * @param k The index of the current tile being processed.
  * @param graph The graph of strongest paths represented as a `CUtensorMap`.
+ *
+ * @note This kernel uses NVIDIA-specific Tensor Memory Access (TMA) and is not available on AMD GPUs.
  */
+#if !defined(SCALING_ELECTIONS_WITH_HIP)
 template <std::uint32_t tile_size>
 __global__ void cuda_independent_hopper_(candidate_idx_t n, candidate_idx_t k,
                                          __grid_constant__ CUtensorMap const graph) {
@@ -328,9 +367,9 @@ __global__ void cuda_independent_hopper_(candidate_idx_t n, candidate_idx_t k,
     if (i == k && j == k)
         return;
 
-    __shared__ alignas(128) votes_count_tile<tile_size> a;
-    __shared__ alignas(128) votes_count_tile<tile_size> b;
-    __shared__ alignas(128) votes_count_tile<tile_size> c;
+    alignas(128) __shared__ votes_count_tile<tile_size> a;
+    alignas(128) __shared__ votes_count_tile<tile_size> b;
+    alignas(128) __shared__ votes_count_tile<tile_size> c;
 
 #pragma nv_diag_suppress static_var_with_dynamic_init
     // Initialize shared memory barrier with the number of threads participating in the barrier.
@@ -414,7 +453,9 @@ __global__ void cuda_independent_hopper_(candidate_idx_t n, candidate_idx_t k,
         printf("This kernel is only supported on Hopper and newer GPUs\n");
 #endif
 }
+#endif  // !defined(SCALING_ELECTIONS_WITH_HIP)
 
+#if !defined(SCALING_ELECTIONS_WITH_HIP)
 PFN_cuTensorMapEncodeTiled_v12000 get_cuTensorMapEncodeTiled() {
     // Get pointer to cuGetProcAddress
     cudaDriverEntryPointQueryResult driver_status;
@@ -436,6 +477,7 @@ PFN_cuTensorMapEncodeTiled_v12000 get_cuTensorMapEncodeTiled() {
         throw std::runtime_error("Failed to get cuTensorMapEncodeTiled");
     return reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(cuTensorMapEncodeTiled_ptr);
 }
+#endif  // !defined(SCALING_ELECTIONS_WITH_HIP)
 
 /**
  * @brief Computes the strongest paths for the block-parallel Schulze voting algorithm in CUDA or @b HIP.
@@ -469,6 +511,8 @@ void compute_strongest_paths_cuda( //
     error = cudaGetDeviceProperties(&device_props, current_device);
     if (error != cudaSuccess)
         throw std::runtime_error("Failed to get device properties");
+
+#if !defined(SCALING_ELECTIONS_WITH_HIP)
     bool supports_tma = device_props.major >= 9;
 
     CUtensorMap strongest_paths_tensor_map{};
@@ -507,6 +551,10 @@ void compute_strongest_paths_cuda( //
         CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
         // Any element that is outside of bounds will be set to zero by the TMA transfer.
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+#else
+    // HIP/AMD GPUs don't support Tensor Memory Access (TMA)
+    bool supports_tma = false;
+#endif
 
     candidate_idx_t tiles_count = (num_candidates + tile_size - 1) / tile_size;
     dim3 tile_shape(tile_size, tile_size, 1);
@@ -514,10 +562,12 @@ void compute_strongest_paths_cuda( //
     for (candidate_idx_t k = 0; k < tiles_count; k++) {
         cuda_diagonal_<tile_size><<<1, tile_shape>>>(num_candidates, k, graph);
         cuda_partially_independent_<tile_size><<<tiles_count, tile_shape>>>(num_candidates, k, graph);
+#if !defined(SCALING_ELECTIONS_WITH_HIP)
         if (supports_tma && allow_tma)
             cuda_independent_hopper_<tile_size>
                 <<<independent_grid, tile_shape>>>(num_candidates, k, strongest_paths_tensor_map);
         else
+#endif
             cuda_independent_<tile_size><<<independent_grid, tile_shape>>>(num_candidates, k, graph);
 
         error = cudaGetLastError();
@@ -526,7 +576,7 @@ void compute_strongest_paths_cuda( //
     }
 }
 
-#endif // defined(__NVCC__)
+#endif // defined(SCALING_ELECTIONS_WITH_CUDA)
 
 #pragma endregion CUDA
 
@@ -952,7 +1002,8 @@ PYBIND11_MODULE(scaling_elections, m) {
 
     // This is how we could have used `thrust::` for higher-level operations
     m.def("reduce", [](py::array_t<float> const& data) -> float {
-#if defined(SCALING_ELECTIONS_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_CUDA) && !defined(SCALING_ELECTIONS_WITH_HIP)
+        // Thrust support - CUDA only (rocThrust not guaranteed to be available)
         py::buffer_info buf = data.request();
         if (buf.ndim != 1 || buf.strides[0] != sizeof(float))
             throw std::runtime_error("Input should be a contiguous 1D float array");
@@ -960,6 +1011,7 @@ PYBIND11_MODULE(scaling_elections, m) {
         thrust::device_vector<float> d_data(ptr, ptr + buf.size);
         return thrust::reduce(thrust::device, d_data.begin(), d_data.end(), 0.0f);
 #else
+        // CPU fallback for HIP and non-CUDA builds
         return std::accumulate(data.data(), data.data() + data.size(), 0.0f);
 #endif
     });
