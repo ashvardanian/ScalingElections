@@ -17,3 +17,6 @@ build-backend = "setuptools.build_meta"
 [project.optional-dependencies]
 cpu = ["numba", "pytest"]
 gpu = ["cupy-cuda12x", "pycuda>=2025.1.2"]
+
+[tool.setuptools]
+py-modules = ["scaling_elections"]
