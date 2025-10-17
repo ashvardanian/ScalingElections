@@ -14,7 +14,11 @@
 #include <thread>    // `std::thread::hardware_concurrency()`
 #include <vector>    // `std::vector`
 
+// OpenMP support detection
+#if defined(_OPENMP)
 #include <omp.h> // `omp_set_num_threads`
+#define SCALING_ELECTIONS_WITH_OPENMP (1)
+#endif
 
 #if (defined(__ARM_NEON) || defined(__aarch64__))
 #define SCALING_ELECTIONS_WITH_NEON (1)
@@ -24,7 +28,7 @@
 #endif
 #if defined(__HIP_PLATFORM_AMD__) || defined(__HIP__)
 #define SCALING_ELECTIONS_WITH_HIP (1)
-#define SCALING_ELECTIONS_WITH_CUDA (1)  // HIP is CUDA-compatible
+#define SCALING_ELECTIONS_WITH_CUDA (1) // HIP is CUDA-compatible
 #endif
 
 #if defined(SCALING_ELECTIONS_WITH_NEON)
@@ -39,12 +43,13 @@
 #include <cuda_runtime.h>
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
-#elif defined(SCALING_ELECTIONS_WITH_HIP)
+
 // AMD HIP headers (CUDA-compatible)
+#elif defined(SCALING_ELECTIONS_WITH_HIP)
 #include <hip/hip_runtime.h>
 
-#ifdef __HIP_PLATFORM_AMD__
 // HIP compatibility layer: map CUDA types/functions to HIP equivalents
+#if defined(__HIP_PLATFORM_AMD__)
 #define cudaError_t hipError_t
 #define cudaSuccess hipSuccess
 #define cudaGetDevice hipGetDevice
@@ -61,12 +66,6 @@
 #define cudaGetErrorString hipGetErrorString
 #define cudaGetDeviceCount hipGetDeviceCount
 
-// HIP provides its own thrust implementation for rocThrust (optional)
-// Note: rocThrust may need to be installed separately
-#if __has_include(<thrust/device_vector.h>)
-#include <thrust/device_vector.h>
-#include <thrust/execution_policy.h>
-#endif
 #endif
 #endif
 
@@ -453,7 +452,7 @@ __global__ void cuda_independent_hopper_(candidate_idx_t n, candidate_idx_t k,
         printf("This kernel is only supported on Hopper and newer GPUs\n");
 #endif
 }
-#endif  // !defined(SCALING_ELECTIONS_WITH_HIP)
+#endif // !defined(SCALING_ELECTIONS_WITH_HIP)
 
 #if !defined(SCALING_ELECTIONS_WITH_HIP)
 PFN_cuTensorMapEncodeTiled_v12000 get_cuTensorMapEncodeTiled() {
@@ -477,7 +476,7 @@ PFN_cuTensorMapEncodeTiled_v12000 get_cuTensorMapEncodeTiled() {
         throw std::runtime_error("Failed to get cuTensorMapEncodeTiled");
     return reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(cuTensorMapEncodeTiled_ptr);
 }
-#endif  // !defined(SCALING_ELECTIONS_WITH_HIP)
+#endif // !defined(SCALING_ELECTIONS_WITH_HIP)
 
 /**
  * @brief Computes the strongest paths for the block-parallel Schulze voting algorithm in CUDA or @b HIP.
@@ -493,7 +492,9 @@ void compute_strongest_paths_cuda( //
     votes_count_t* preferences, candidate_idx_t num_candidates, candidate_idx_t row_stride, votes_count_t* graph,
     bool allow_tma) {
 
+#if defined(SCALING_ELECTIONS_WITH_OPENMP)
 #pragma omp parallel for collapse(2)
+#endif
     for (candidate_idx_t i = 0; i < num_candidates; i++)
         for (candidate_idx_t j = 0; j < num_candidates; j++)
             if (i != j)
@@ -618,7 +619,11 @@ inline void process_tile_openmp_(                 //
                 uint32x4_t a_vec = vdupq_n_u32(a[bi][k]);
                 uint32x4_t is_not_diagonal_a = vdupq_n_u32((a_row + bi) != (a_col + k));
                 uint32x4_t c_row_plus_bi_vec = vdupq_n_u32(c_row + bi);
+#if defined(__clang__) // Apple's Clang can't handle `#pragma unroll`
+#pragma clang loop unroll(full)
+#else
 #pragma unroll full
+#endif
                 for (candidate_idx_t bj = 0; bj < tile_size; bj += 4) {
                     votes_count_t* c_ptr = &c[bi][bj];
                     uint32x4_t c_vec = vld1q_u32(c_ptr);
@@ -678,7 +683,11 @@ void memcpy2d(votes_count_t const* source, candidate_idx_t stride, votes_count_t
 #if defined(SCALING_ELECTIONS_WITH_NEON)
     if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size % 4 == 0 && !check_tail) {
         for (candidate_idx_t i = 0; i < tile_size; i++) {
+#if defined(__clang__) // Apple's Clang can't handle `#pragma unroll`
+#pragma clang loop unroll(full)
+#else
 #pragma unroll full
+#endif
             for (candidate_idx_t j = 0; j < tile_size; j += 4) {
                 vst1q_u32(&target[i][j], vld1q_u32(&source[i * stride + j]));
             }
@@ -704,7 +713,11 @@ void memcpy2d(votes_count_tile<tile_size> const& source, candidate_idx_t stride,
 #if defined(SCALING_ELECTIONS_WITH_NEON)
     if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size % 4 == 0 && !check_tail) {
         for (candidate_idx_t i = 0; i < tile_size; i++) {
+#if defined(__clang__) // Apple's Clang can't handle `#pragma unroll`
+#pragma clang loop unroll(full)
+#else
 #pragma unroll full
+#endif
             for (candidate_idx_t j = 0; j < tile_size; j += 4) {
                 vst1q_u32(&target[i * stride + j], vld1q_u32(&source[i][j]));
             }
@@ -920,8 +933,10 @@ static py::array_t<votes_count_t> compute_strongest_paths(      //
     }
 #endif // defined(__NVCC__)
 
+#if defined(SCALING_ELECTIONS_WITH_OPENMP)
     omp_set_dynamic(0); // ? Explicitly disable dynamic teams
     omp_set_num_threads(std::thread::hardware_concurrency());
+#endif
 
     // Probe for the largest possible tile size, if not previously specified
     using kernel_t = void (*)(votes_count_t*, candidate_idx_t, candidate_idx_t, votes_count_t*);

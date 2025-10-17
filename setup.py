@@ -3,9 +3,43 @@ from setuptools import setup
 from setuptools.extension import Extension
 from setuptools.command.build_ext import build_ext
 from distutils.sysconfig import get_python_inc, get_python_lib
+import platform
 
 import pybind11
 import numpy as np
+
+
+# Detect CUDA availability
+def has_cuda():
+    """Check if CUDA is available."""
+    # Check for nvcc
+    if os.system("which nvcc > /dev/null 2>&1") != 0:
+        return False
+    # Check for CUDA headers
+    if not os.path.exists("/usr/local/cuda/include/cuda.h"):
+        return False
+    return True
+
+
+# Detect ROCm/HIP availability
+def has_rocm():
+    """Check if ROCm/HIP is available."""
+    # Check for hipcc
+    if os.system("which hipcc > /dev/null 2>&1") != 0:
+        return False
+    # Check for HIP headers in common ROCm locations
+    hip_paths = [
+        "/opt/rocm/include/hip/hip_runtime.h",
+        "/opt/rocm/hip/include/hip/hip_runtime.h"
+    ]
+    if not any(os.path.exists(path) for path in hip_paths):
+        return False
+    return True
+
+
+cuda_available = has_cuda()
+rocm_available = has_rocm()
+is_macos = platform.system() == "Darwin"
 
 
 class BuildExt(build_ext):
@@ -87,17 +121,30 @@ class BuildExt(build_ext):
         # Compile all source files with GCC, including treating .cu files as .cpp files
         objects = []
         # Aggressive optimization flags for CPU performance
-        opt_flags = [
-            "-fPIC",
-            "-fopenmp",
-            "-O3",  # Maximum optimization
-            "-ffast-math",  # Aggressive floating-point optimizations
-            "-march=native",  # Use all available CPU instructions (AVX, AVX2, AVX-512, etc.)
-            "-mtune=native",  # Tune for the specific CPU
-            "-funroll-loops",  # Loop unrolling
-            "-ftree-vectorize",  # Enable vectorization
-            "-fopt-info-vec-optimized",  # Report successful vectorizations
-        ]
+        if is_macos:
+            # macOS with clang doesn't support some GCC flags
+            opt_flags = [
+                "-std=c++17",  # C++17 standard, required for pybind11
+                "-fPIC", # Position Independent Code
+                "-O3",  # Maximum optimization
+                "-ffast-math",  # Aggressive floating-point optimizations
+                "-march=native",  # Use all available CPU instructions
+                "-funroll-loops",  # Loop unrolling
+            ]
+        else:
+            # Linux with GCC
+            opt_flags = [
+                "-std=c++17",  # C++17 standard, required for pybind11
+                "-fPIC", # Position Independent Code
+                "-fopenmp", # OpenMP support
+                "-O3",  # Maximum optimization
+                "-ffast-math",  # Aggressive floating-point optimizations
+                "-march=native",  # Use all available CPU instructions (AVX, AVX2, AVX-512, etc.)
+                "-mtune=native",  # Tune for the specific CPU
+                "-funroll-loops",  # Loop unrolling
+                "-ftree-vectorize",  # Enable vectorization
+                "-fopt-info-vec-optimized",  # Report successful vectorizations
+            ]
         for source in ext.sources:
             if source.endswith(".cu"):
                 obj = self.compiler.compile(
@@ -116,11 +163,11 @@ class BuildExt(build_ext):
                 )
             objects.extend(obj)
 
-        # Link all object files
+        # Link all object files with libraries from extension config
         self.compiler.link_shared_object(
             objects,
             self.get_ext_fullpath(ext.name),
-            libraries=[lib for lib in ext.libraries if not lib.startswith("cu")],
+            libraries=ext.libraries,
             library_dirs=ext.library_dirs,
             runtime_library_dirs=ext.runtime_library_dirs,
             extra_postargs=ext.extra_link_args,
@@ -246,38 +293,8 @@ if not python_lib_dir or not os.path.exists(os.path.join(python_lib_dir, f"libpy
 python_lib_name = f"python{sys.version_info.major}.{sys.version_info.minor}"
 
 
-# Detect CUDA availability
-def has_cuda():
-    """Check if CUDA is available."""
-    # Check for nvcc
-    if os.system("which nvcc > /dev/null 2>&1") != 0:
-        return False
-    # Check for CUDA headers
-    if not os.path.exists("/usr/local/cuda/include/cuda.h"):
-        return False
-    return True
 
-
-# Detect ROCm/HIP availability
-def has_rocm():
-    """Check if ROCm/HIP is available."""
-    # Check for hipcc
-    if os.system("which hipcc > /dev/null 2>&1") != 0:
-        return False
-    # Check for HIP headers in common ROCm locations
-    hip_paths = [
-        "/opt/rocm/include/hip/hip_runtime.h",
-        "/opt/rocm/hip/include/hip/hip_runtime.h"
-    ]
-    if not any(os.path.exists(path) for path in hip_paths):
-        return False
-    return True
-
-
-cuda_available = has_cuda()
-rocm_available = has_rocm()
-
-# Build extension based on GPU availability
+# Build extension based on GPU availability and platform
 if cuda_available:
     print("Building with CUDA support")
     ext_modules = [
@@ -343,31 +360,56 @@ elif rocm_available:
         ),
     ]
 else:
-    print("Building CPU-only (OpenMP) - No GPU support (CUDA/ROCm) available")
-    ext_modules = [
-        Extension(
-            "scaling_elections",
-            ["scaling_elections.cu"],  # Will be compiled as C++ with GCC
-            include_dirs=[
-                pybind11.get_include(),
-                np.get_include(),
-                get_python_inc(),
-            ],
-            library_dirs=[
-                "/usr/lib/x86_64-linux-gnu",
-                python_lib_dir,
-            ],
-            libraries=[
-                "gomp",  # OpenMP
-                python_lib_name,
-            ],
-            extra_link_args=[
-                f"-Wl,-rpath,{python_lib_dir}",
-                "-fopenmp",
-            ],
-            language="c++",
-        ),
-    ]
+    # CPU-only build
+    if is_macos:
+        print("Building CPU-only (macOS, no OpenMP) - No GPU support available")
+        ext_modules = [
+            Extension(
+                "scaling_elections",
+                ["scaling_elections.cu"],  # Will be compiled as C++ with clang
+                include_dirs=[
+                    pybind11.get_include(),
+                    np.get_include(),
+                    get_python_inc(),
+                ],
+                library_dirs=[
+                    python_lib_dir,
+                ],
+                libraries=[
+                    python_lib_name,
+                ],
+                extra_link_args=[
+                    f"-Wl,-rpath,{python_lib_dir}",
+                ],
+                language="c++",
+            ),
+        ]
+    else:
+        print("Building CPU-only (OpenMP) - No GPU support (CUDA/ROCm) available")
+        ext_modules = [
+            Extension(
+                "scaling_elections",
+                ["scaling_elections.cu"],  # Will be compiled as C++ with GCC
+                include_dirs=[
+                    pybind11.get_include(),
+                    np.get_include(),
+                    get_python_inc(),
+                ],
+                library_dirs=[
+                    "/usr/lib/x86_64-linux-gnu",
+                    python_lib_dir,
+                ],
+                libraries=[
+                    "gomp",  # OpenMP
+                    python_lib_name,
+                ],
+                extra_link_args=[
+                    f"-Wl,-rpath,{python_lib_dir}",
+                    "-fopenmp",
+                ],
+                language="c++",
+            ),
+        ]
 
 
 setup(
