@@ -24,6 +24,7 @@
     "numba",
     "openmp",
     "prange",
+    "rocm",
     "schulze",
     "syncthreads",
     "tparam",
