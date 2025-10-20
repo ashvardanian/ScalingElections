@@ -51,6 +51,7 @@ from time import perf_counter_ns
 # GPU acceleration
 from buffer import NDBuffer
 from layout import Layout, LayoutTensor
+from layout.tma_async import TMATensorTile, SharedMemBarrier, create_tma_tile
 
 # TODO: Find a good way to feature-gate GPU code for CPU-only machines
 from gpu.host import DeviceContext, DeviceBuffer, HostBuffer
@@ -1230,6 +1231,111 @@ fn gpu_independent_kernel[tile_size: Int](
     # Write back result
     graph[i * tile_size * n + j * tile_size + bi * n + bj] = c_shared[bi * tile_size + bj]
 
+fn gpu_independent_kernel_tma[tile_size: Int](
+    a_tma: TMATensorTile[DType.uint32],
+    b_tma: TMATensorTile[DType.uint32],
+    c_tma: TMATensorTile[DType.uint32],
+    n: Int,
+    k: Int
+):
+    """
+    TMA-enabled GPU kernel for independent phase using Tensor Memory Accelerator.
+    Uses TMA for efficient asynchronous bulk data movement between global and shared memory.
+
+    This kernel demonstrates Mojo's high-level TMA abstraction for H200 (Hopper) GPUs.
+    """
+    var j = Int(block_idx.x)
+    var i = Int(block_idx.y)
+    var bi = Int(thread_idx.y)
+    var bj = Int(thread_idx.x)
+
+    if i == k and j == k:
+        return
+
+    # Allocate raw shared memory first (128-byte aligned for TMA)
+    var a_raw = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        alignment=128,
+        address_space=AddressSpace(3),
+    ]()
+    var b_raw = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        alignment=128,
+        address_space=AddressSpace(3),
+    ]()
+    var c_raw = stack_allocation[
+        tile_size * tile_size,
+        UInt32,
+        alignment=128,
+        address_space=AddressSpace(3),
+    ]()
+
+    # Create LayoutTensor views wrapping the shared memory (required for TMA)
+    # TMA API requires LayoutTensor - trying without explicit origin to let it infer
+    alias tile_layout = Layout.row_major(tile_size, tile_size)
+    var a_shared = LayoutTensor[DType.uint32, tile_layout, address_space=AddressSpace(3)](a_raw)
+    var b_shared = LayoutTensor[DType.uint32, tile_layout, address_space=AddressSpace(3)](b_raw)
+    var c_shared = LayoutTensor[DType.uint32, tile_layout, address_space=AddressSpace(3)](c_raw)
+
+    # Create shared memory barrier for TMA synchronization
+    var tma_barrier = stack_allocation[
+        1,
+        SharedMemBarrier,
+        address_space=AddressSpace(3),
+    ]()
+
+    # Only thread 0 initiates TMA operations (single-thread TMA)
+    var is_leader = thread_idx.x == 0 and thread_idx.y == 0
+
+    if is_leader:
+        # Initialize barrier and set expected bytes for 3 tile transfers
+        # Each UInt32 is 4 bytes, so tile_size * tile_size * 4 bytes per tile
+        var bytes_per_tile = tile_size * tile_size * 4
+
+        # Initialize barrier with expected bytes
+        tma_barrier[0].expect_bytes(3 * bytes_per_tile)
+
+        # Launch async TMA copies for all three tiles
+        # Load c[i,j], a[i,k], b[k,j]
+        # CRITICAL: Argument order is (dst_tile, barrier, coords) NOT (dst_tile, coords, barrier)!
+        c_tma.async_copy(c_shared, tma_barrier[0], (UInt(i * tile_size), UInt(j * tile_size)))
+        a_tma.async_copy(a_shared, tma_barrier[0], (UInt(i * tile_size), UInt(k * tile_size)))
+        b_tma.async_copy(b_shared, tma_barrier[0], (UInt(k * tile_size), UInt(j * tile_size)))
+
+    # All threads wait for TMA transfers to complete
+    barrier()
+    tma_barrier[0].wait()
+
+    # Process tile using raw pointers (process_tile_gpu_device expects SharedUInt32Ptr)
+    # Use diagonal check if i == j, no synchronization needed (different tiles)
+    if i == j:
+        process_tile_gpu_device[tile_size, True, False](
+            c_raw, a_raw, b_raw,
+            i * tile_size, j * tile_size,
+            i * tile_size, k * tile_size,
+            k * tile_size, j * tile_size
+        )
+    else:
+        process_tile_gpu_device[tile_size, False, False](
+            c_raw, a_raw, b_raw,
+            i * tile_size, j * tile_size,
+            i * tile_size, k * tile_size,
+            k * tile_size, j * tile_size
+        )
+
+    barrier()
+
+    # Use TMA to store result back to global memory
+    if is_leader:
+        # Cast coordinates to UInt as required by async_store
+        var coord_i = UInt(i * tile_size)
+        var coord_j = UInt(j * tile_size)
+        c_tma.async_store(c_shared, (coord_i, coord_j))
+        c_tma.commit_group()
+        c_tma.wait_group[0]()
+
 fn compute_strongest_paths_gpu[tile_size: Int = DEFAULT_GPU_TILE_SIZE](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
     """
     Pure Mojo GPU implementation of Schulze strongest paths computation.
@@ -1324,6 +1430,113 @@ fn compute_strongest_paths_gpu[tile_size: Int = DEFAULT_GPU_TILE_SIZE](preferenc
 
     return result^
 
+fn compute_strongest_paths_gpu_tma[tile_size: Int = DEFAULT_GPU_TILE_SIZE](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    """
+    TMA-enabled GPU implementation of Schulze strongest paths computation.
+
+    Uses Tensor Memory Accelerator (TMA) for phase 3 (independent tiles) to accelerate
+    asynchronous bulk memory transfers on Hopper (H100/H200) GPUs.
+
+    Phases 1 and 2 use regular kernels, only phase 3 leverages TMA for optimal performance.
+
+    Parameters:
+        tile_size: Compile-time tile size for GPU processing (default: 32).
+
+    Args:
+        preferences: Input preference matrix.
+
+    Returns:
+        StrongestPathsMatrix with computed strongest paths.
+    """
+    var num_candidates = preferences.num_candidates
+    var result = StrongestPathsMatrix(num_candidates)
+
+    # Step 1: Initialize result matrix on CPU (parallelized)
+    @parameter
+    fn init_paths(i: Int):
+        for j in range(num_candidates):
+            if i != j:
+                var pref_ij = preferences[i, j]
+                var pref_ji = preferences[j, i]
+                if pref_ij > pref_ji:
+                    result[i, j] = pref_ij
+                else:
+                    result[i, j] = 0
+
+    parallelize[init_paths](num_candidates)
+
+    # Step 2: Create GPU device context
+    var ctx = DeviceContext()
+
+    # Step 3: Allocate host and device memory
+    var matrix_size = num_candidates * num_candidates
+    var host_graph = ctx.enqueue_create_host_buffer[DType.uint32](matrix_size)
+    var device_graph = ctx.enqueue_create_buffer[DType.uint32](matrix_size)
+
+    # Step 4: Copy initialized data to host buffer
+    for i in range(matrix_size):
+        host_graph[i] = result.data[i]
+
+    # Step 5: Copy from host buffer to device buffer
+    host_graph.enqueue_copy_to(device_graph)
+    ctx.synchronize()
+
+    # Get raw pointer from device buffer for kernel access (for phases 1 & 2)
+    var graph_ptr = device_graph.unsafe_ptr()
+
+    # Step 6: Create 2D tensor view for TMA
+    var graph_2d = NDBuffer[DType.uint32, 2](
+        device_graph.unsafe_ptr(),
+        (num_candidates, num_candidates)
+    )
+
+    # Step 7: Create TMA tile descriptors (COMPILATION WILL FAIL HERE)
+    var a_tma = create_tma_tile[tile_size, tile_size](ctx, graph_2d)
+    var b_tma = create_tma_tile[tile_size, tile_size](ctx, graph_2d)
+    var c_tma = create_tma_tile[tile_size, tile_size](ctx, graph_2d)
+
+    # Step 8: Execute tiled Floyd-Warshall on GPU with TMA
+    var num_tiles = (num_candidates + tile_size - 1) // tile_size
+    var block_dim_tuple = (tile_size, tile_size, 1)
+
+    for k in range(num_tiles):
+        # Phase 1: Diagonal tile (sequential, 1 block) - regular kernel
+        ctx.enqueue_function[gpu_diagonal_kernel[tile_size]](
+            graph_ptr, num_candidates, k,
+            grid_dim=(1, 1, 1),
+            block_dim=block_dim_tuple
+        )
+
+        # Phase 2: Partially independent tiles (num_tiles blocks) - regular kernel
+        ctx.enqueue_function[gpu_partially_independent_kernel[tile_size]](
+            graph_ptr, num_candidates, k,
+            grid_dim=(num_tiles, 1, 1),
+            block_dim=block_dim_tuple
+        )
+
+        # Phase 3: Independent tiles with TMA (num_tiles x num_tiles blocks)
+        ctx.enqueue_function[gpu_independent_kernel_tma[tile_size]](
+            a_tma, b_tma, c_tma, num_candidates, k,
+            grid_dim=(num_tiles, num_tiles, 1),
+            block_dim=block_dim_tuple
+        )
+
+        # Synchronize after each k iteration
+        ctx.synchronize()
+
+    # Step 8: Copy results back from GPU to CPU
+    ctx.synchronize()  # Ensure all GPU operations complete
+
+    # Copy from device buffer to host buffer
+    device_graph.enqueue_copy_to(host_graph)
+    ctx.synchronize()
+
+    # Copy from host buffer to result
+    for i in range(matrix_size):
+        result.data[i] = UInt32(host_graph[i])
+
+    return result^
+
 fn validate_against_baseline(result: StrongestPathsMatrix, baseline: StrongestPathsMatrix) -> Bool:
     """Check if two results match."""
     var n = result.num_candidates
@@ -1360,7 +1573,7 @@ fn print_usage():
     print("  --num-voters N        Number of voters (default: 2000)")
     print("                        Set to 0 for instant random preference matrix generation")
     print("  --run-cpu             Run CPU implementations (tiled + SIMD-vectorized)")
-    print("  --run-gpu             Run GPU implementation")
+    print("  --run-gpu             Run GPU+TMA implementation")
     print("  --no-serial           Skip serial baseline")
     print("  --cpu-tile-size N     CPU tile size: 4, 8, 12, 16, 24, 32, 48, 64, 96, 128 (default: 16)")
     print("  --gpu-tile-size N     GPU tile size: 4, 8, 12, 16, 24, 32, 48, 64 (default: 32)")
@@ -1538,6 +1751,28 @@ fn main():
                     has_winner = True
         except e:
             print("  ✗ GPU failed: " + String(e))
+            print()
+
+    # Run GPU+TMA implementation - dispatch to correct tile size
+    if run_gpu:
+        try:
+            # TODO: Rewrite it once `Tuple.__iter__` is supported
+            @parameter
+            for i in range(len(ALLOWED_GPU_TILE_SIZES)):
+                alias tile_size = ALLOWED_GPU_TILE_SIZES[i]
+                if gpu_tile_size != tile_size: continue
+
+                var result_tuple = profile_and_report(
+                    "Tiled GPU+TMA (Mojo)",
+                    compute_strongest_paths_gpu_tma[tile_size],
+                    preferences, warmup, repeat, num_candidates, has_baseline, baseline
+                )
+                if not has_winner:
+                    winner = result_tuple[1]
+                    ranking = result_tuple[2].copy()
+                    has_winner = True
+        except e:
+            print("  ✗ GPU+TMA failed: " + String(e))
             print()
 
     # Compute fallback if no results
