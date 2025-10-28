@@ -1,6 +1,6 @@
-# Scaling Elections with GPUs
+# Scaling Elections with GPUs and Mojo 🔥
 
-![Scaling Elections Thumbnail](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/scaling-democracy.jpg?raw=true)
+![Scaling Elections Thumbnail](https://github.com/ashvardanian/ashvardanian/blob/master/repositories/ScalingElections.jpg?raw=true)
 
 This repository implements tiled parallel adaptations of the Schulze voting algorithm with hardware acceleration across CPUs and GPUs in Mojo and CUDA C++ wrapped into Python.
 That algorithm is often used by Pirate Parties and open-source foundations, and it's a good example of a combinatorial problem that can be parallelized by changing evaluation order.
@@ -78,18 +78,19 @@ pixi run mojo build scaling_elections.mojo -o schulze
 ## Throughput
 
 Similar to measuring matrix multiplications in FLOPS, we can measure the throughput of the Schulze algorithm in cells per second.
-Or in our case, in GigaCells per Second (gcs), where a cell is a single pairwise comparison between two candidates.
+Or in our case, in Giga- or TeraCells per Second (gcs/tcs), where a cell is a single pairwise comparison between two candidates.
 
-| Candidates | Numba `384c` | Mojo 🔥 `384c` | Mojo 🔥 SIMD `384c` | CUDA `h100` | Mojo 🔥 `h100` |
-| :--------- | -----------: | ------------: | -----------------: | ----------: | ------------: |
-| 2'048      |     34.4 gcs |      37.9 gcs |           62.1 gcs |   182.7 gcs |     153.4 gcs |
-| 4'096      |     86.8 gcs |      59.8 gcs |          171.5 gcs |   264.1 gcs |     232.6 gcs |
-| 8'192      |     74.6 gcs |      76.6 gcs |          357.3 gcs |   495.3 gcs |     408.0 gcs |
-| 16'384     |     76.7 gcs |      80.7 gcs |          369.0 gcs |   600.7 gcs |     635.3 gcs |
-| 32'768     |    101.4 gcs |      82.3 gcs |          293.1 gcs |   921.4 gcs |     893.7 gcs |
+| Candidates | Numba `384c` | Mojo 🔥 `384c` | Mojo 🔥 SIMD `384c` | CUDA `h100` | Mojo 🔥 `h100` | Mojo 🔥 `mi355x` |
+| :--------- | -----------: | ------------: | -----------------: | ----------: | ------------: | --------------: |
+| 2'048      |     34.4 gcs |      37.9 gcs |           62.1 gcs |   182.7 gcs |     153.4 gcs |       830.8 gcs |
+| 4'096      |     86.8 gcs |      59.8 gcs |          171.5 gcs |   264.1 gcs |     232.6 gcs |         1.5 tcs |
+| 8'192      |     74.6 gcs |      76.6 gcs |          357.3 gcs |   495.3 gcs |     408.0 gcs |         2.4 tcs |
+| 16'384     |     76.7 gcs |      80.7 gcs |          369.0 gcs |   600.7 gcs |     635.3 gcs |         2.9 tcs |
+| 32'768     |    101.4 gcs |      82.3 gcs |          293.1 gcs |   921.4 gcs |     893.7 gcs |         3.5 tcs |
 
 > The `384c` columns refer to benchmarks obtained on AWS `m8i` instances with dual-socket Xeon 6 CPUs, totalling 384 cores.
 > The `h100` columns refer to benchmarks obtained on Nebius GPU instances with NVIDIA H100 GPUs.
+> The `mi355x` column refers to benchmarks obtained on AMD's MI355X GPUs.
 
 ---
 
