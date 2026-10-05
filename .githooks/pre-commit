@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+snapshot=$(mktemp -d)
+trap 'rm -rf "$snapshot"' EXIT
+git checkout-index --all --prefix="$snapshot/"
+cd "$root"
+status=0
+
+python_files=()
+cpp_files=()
+mojo_files=()
+toml_files=()
+while IFS= read -r -d '' path; do
+    case "$path" in
+        *.py) python_files+=("$snapshot/$path") ;;
+        *.cu|*.cuh|*.cpp|*.hpp|*.h) cpp_files+=("$snapshot/$path") ;;
+        *.mojo) mojo_files+=("$path") ;;
+        *.toml) toml_files+=("$snapshot/$path") ;;
+    esac
+done < <(git ls-files -z)
+
+if ((${#python_files[@]})); then
+    uv run --no-sync ruff format --check --config "$snapshot/pyproject.toml" "${python_files[@]}" || status=1
+fi
+if ((${#cpp_files[@]})); then
+    clang-format --dry-run --Werror "${cpp_files[@]}" || status=1
+fi
+if ((${#mojo_files[@]})); then
+    for path in "${mojo_files[@]}"; do
+        pixi run mojo format -l 120 "$snapshot/$path" || status=1
+        if ! git show ":$path" | cmp -s - "$snapshot/$path"; then
+            echo "Unformatted Mojo file: $path (run pixi run format)" >&2
+            status=1
+        fi
+    done
+fi
+if ((${#toml_files[@]})); then
+    (cd "$snapshot" && taplo format --check) || status=1
+fi
+git diff --cached --check || status=1
+exit "$status"

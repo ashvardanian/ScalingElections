@@ -1,6 +1,10 @@
 [workspace]
 authors = ["Ash Vardanian <1983160+ashvardanian@users.noreply.github.com>"]
-channels = ["conda-forge", "https://conda.modular.com/max", "https://repo.prefix.dev/modular-community"]
+channels = [
+  "conda-forge",
+  "https://conda.modular.com/max",
+  "https://repo.prefix.dev/modular-community",
+]
 description = "ScalingElections: Condorcet Voting at GPU Speed — Schulze as semiring matrix multiplication, Kemeny-Young as exact NP-hard search"
 homepage = "https://ashvardanian.com/posts/scaling-elections"
 license = "Apache-2.0"
@@ -21,9 +25,16 @@ python = "3.12.*"
 # `mojo build -o` writes into a directory but will not create one, and `build/` is ignored.
 [tasks]
 prepare = "mkdir -p build"
-build = {depends-on = ["build-bindings", "build-cli"]}
-build-bindings = {cmd = "mojo build scalingelections.mojo --emit shared-lib -o build/scalingelections_mojo.so", depends-on = ["prepare"]}
-build-cli = {cmd = "mojo build cli.mojo -o build/scalingelections", depends-on = ["prepare"]}
-bench = {cmd = "build/scalingelections", depends-on = ["build-cli"]}
-test = {cmd = "uv run --no-sync pytest test.py", depends-on = ["build-bindings"]}
-format = "mojo format -l 120 *.mojo"
+build = { depends-on = ["build-bindings", "build-cli"] }
+build-bindings = { cmd = "mojo build scalingelections.mojo --emit shared-lib -o build/scalingelections_mojo.so", depends-on = [
+  "prepare",
+] }
+build-cli = { cmd = "mojo build cli.mojo -o build/scalingelections", depends-on = [
+  "prepare",
+] }
+bench = { cmd = "build/scalingelections", depends-on = ["build-cli"] }
+test = { cmd = "uv run --no-sync pytest test.py", depends-on = [
+  "build-bindings",
+] }
+format = "uv run --no-sync ruff format *.py assets/charts.py && clang-format -i *.cu *.cuh && mojo format -l 120 *.mojo && taplo format"
+hooks = "git config core.hooksPath .githooks"

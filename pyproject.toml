@@ -1,13 +1,13 @@
 [project]
 authors = [
-  {name = "Ash Vardanian", email = "1983160+ashvardanian@users.noreply.github.com"},
+  { name = "Ash Vardanian", email = "1983160+ashvardanian@users.noreply.github.com" },
 ]
 dependencies = ["numba>=0.67", "numpy>=2.0"]
 description = "ScalingElections: Condorcet Voting at GPU Speed — Schulze as semiring matrix multiplication, Kemeny-Young as exact NP-hard search"
 name = "ScalingElections"
 readme = "README.md"
 requires-python = ">=3.12"
-urls = {Homepage = "https://ashvardanian.com/posts/scaling-elections", Repository = "https://github.com/ashvardanian/ScalingElections"}
+urls = { Homepage = "https://ashvardanian.com/posts/scaling-elections", Repository = "https://github.com/ashvardanian/ScalingElections" }
 version = "0.2.0"
 
 [build-system]
@@ -51,13 +51,13 @@ ignore = [
   "E741", # ambiguous variable names
 ]
 select = [
-  "E", # pycodestyle errors
-  "W", # pycodestyle warnings
-  "F", # pyflakes
-  "I", # isort import ordering
-  "UP", # pyupgrade
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort import ordering
+  "UP",  # pyupgrade
   "YTT", # flake8-2020
-  "B", # flake8-bugbear
+  "B",   # flake8-bugbear
   "SIM", # flake8-simplify
 ]
 

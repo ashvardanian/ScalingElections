@@ -26,7 +26,7 @@ FIRST_POINT, LAST_POINT = 125.6, 864.4
 BASELINE_Y, PIXELS_PER_DECADE = 404.0, 44.0
 SANS = "ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
-SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#9861d6")
+SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#9861d6", "#c64f68", "#8c7853")
 
 LEGEND_FONT_SIZE = 12.5
 LEGEND_SWATCH = 11.0
@@ -70,6 +70,22 @@ def render(options: argparse.Namespace, theme: str) -> str:
     floor = min(value for _, value in ticks)
     columns = options.columns.split(",")
     spacing = (LAST_POINT - FIRST_POINT) / (len(columns) - 1)
+    names = [series_argument(entry)[0] for entry in options.series]
+    legend_rows: list[list[tuple[int, str, float]]] = [[]]
+    row_width = 0.0
+    for order, name in enumerate(names):
+        width = LEGEND_SWATCH + text_width(name, LEGEND_FONT_SIZE)
+        if width > PLOT_RIGHT - PLOT_LEFT:
+            raise SystemExit(f"legend entry is too wide: {name}")
+        if legend_rows[-1] and (
+            row_width + LEGEND_GAP + width > PLOT_RIGHT - PLOT_LEFT
+            or (name.startswith("Pref-Voting") and not legend_rows[-1][-1][1].startswith("Pref-Voting"))
+        ):
+            legend_rows.append([])
+            row_width = 0.0
+        row_width += (LEGEND_GAP if legend_rows[-1] else 0.0) + width
+        legend_rows[-1].append((order, name, width))
+    height = HEIGHT + 22 * (len(legend_rows) - 1)
 
     def y_of(value: float) -> float:
         return BASELINE_Y - (math.log10(value) - math.log10(floor)) * PIXELS_PER_DECADE
@@ -78,9 +94,9 @@ def render(options: argparse.Namespace, theme: str) -> str:
         return FIRST_POINT + index * spacing
 
     parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}" '
-        f'viewBox="0 0 {WIDTH} {HEIGHT}" font-family="{SANS}" role="img" aria-label="{options.alt}">',
-        f'<rect width="{WIDTH}" height="{HEIGHT}" rx="14" fill="{palette["page"]}"/>',
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{height}" '
+        f'viewBox="0 0 {WIDTH} {height}" font-family="{SANS}" role="img" aria-label="{options.alt}">',
+        f'<rect width="{WIDTH}" height="{height}" rx="14" fill="{palette["page"]}"/>',
         f'<text x="96" y="40" font-size="21" font-weight="650" fill="{palette["title"]}">{options.title}</text>',
         f'<text x="96" y="62" font-size="13" fill="{palette["muted"]}">{options.subtitle}</text>',
     ]
@@ -122,18 +138,20 @@ def render(options: argparse.Namespace, theme: str) -> str:
                 f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}" stroke="{palette["page"]}" stroke-width="2"/>'
             )
 
-    names = [series_argument(entry)[0] for entry in options.series]
-    widths = [LEGEND_SWATCH + text_width(name, LEGEND_FONT_SIZE) for name in names]
-    legend_x = PLOT_LEFT + max(0.0, (PLOT_RIGHT - PLOT_LEFT - sum(widths) - LEGEND_GAP * (len(names) - 1)) / 2)
-    if legend_x + sum(widths) + LEGEND_GAP * (len(names) - 1) > PLOT_RIGHT:
-        raise SystemExit(f"legend is {sum(widths):.0f}pt wide and will not fit; shorten the series names")
-    for order, name in enumerate(names):
-        parts.append(f'<circle cx="{legend_x:.1f}" cy="472" r="4" fill="{SERIES_COLORS[order % len(SERIES_COLORS)]}"/>')
-        parts.append(
-            f'<text x="{legend_x + LEGEND_SWATCH:.1f}" y="476" font-size="{LEGEND_FONT_SIZE}" '
-            f'fill="{palette["muted"]}">{name}</text>'
-        )
-        legend_x += widths[order] + LEGEND_GAP
+    for row_index, row in enumerate(legend_rows):
+        width = sum(entry[2] for entry in row) + LEGEND_GAP * (len(row) - 1)
+        legend_x = PLOT_LEFT + (PLOT_RIGHT - PLOT_LEFT - width) / 2
+        legend_y = 472 + row_index * 22
+        for order, name, width in row:
+            parts.append(
+                f'<circle cx="{legend_x:.1f}" cy="{legend_y}" r="4" '
+                f'fill="{SERIES_COLORS[order % len(SERIES_COLORS)]}"/>'
+            )
+            parts.append(
+                f'<text x="{legend_x + LEGEND_SWATCH:.1f}" y="{legend_y + 4}" font-size="{LEGEND_FONT_SIZE}" '
+                f'fill="{palette["muted"]}">{name}</text>'
+            )
+            legend_x += width + LEGEND_GAP
 
     parts.append("</svg>")
     return "\n".join(parts) + "\n"

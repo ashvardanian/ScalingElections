@@ -14,7 +14,12 @@ masking. The GPU version runs those same phases as three kernels per diagonal ti
 
 from std.builtin.sort import sort
 from std.math import iota
-from std.memory import AddressSpace, stack_allocation, unsafe_memcpy, unsafe_memset_zero
+from std.memory import (
+    AddressSpace,
+    stack_allocation,
+    unsafe_memcpy,
+    unsafe_memset_zero,
+)
 
 from max.algorithm import parallelize
 from max.gpu import barrier, block_idx, thread_idx
@@ -358,7 +363,9 @@ def tile_origin(tile_index: Int, tile_size: Int) -> Int:
 
 
 def compute_strongest_paths_tiled_cpu[
-    score_dtype: DType = DType.uint32, tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
+    score_dtype: DType = DType.uint32,
+    tile_size: Int = TILE_SIZE,
+    seed: SeedGraph = SeedGraph.winning_votes,
 ](preferences: PreferenceMatrix) raises -> VoteMatrix[score_dtype]:
     """
     Tiled CPU implementation of Schulze strongest paths computation.
@@ -589,7 +596,9 @@ def compute_strongest_paths_tiled_cpu[
 
 
 def compute_strongest_paths_tiled_cpu_simd[
-    score_dtype: DType = DType.uint32, tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
+    score_dtype: DType = DType.uint32,
+    tile_size: Int = TILE_SIZE,
+    seed: SeedGraph = SeedGraph.winning_votes,
 ](preferences: PreferenceMatrix) raises -> VoteMatrix[score_dtype]:
     """
     SIMD-vectorized tiled CPU implementation of Schulze strongest paths computation.
@@ -832,9 +841,21 @@ def compute_strongest_paths_tiled_cpu_simd[
 def process_tile_gpu_device[
     score_dtype: DType, tile_size: Int, phase: TilePhase
 ](
-    output_shared: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
-    left_shared: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
-    right_shared: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
+    output_shared: Pointer[
+        SIMD[score_dtype, 1],
+        MutUntrackedOrigin,
+        address_space=AddressSpace.SHARED,
+    ],
+    left_shared: Pointer[
+        SIMD[score_dtype, 1],
+        MutUntrackedOrigin,
+        address_space=AddressSpace.SHARED,
+    ],
+    right_shared: Pointer[
+        SIMD[score_dtype, 1],
+        MutUntrackedOrigin,
+        address_space=AddressSpace.SHARED,
+    ],
     output_row: Int,
     output_column: Int,
     left_row: Int,
@@ -894,7 +915,7 @@ def process_tile_gpu_device[
 
 def gpu_diagonal_kernel[
     score_dtype: DType, tile_size: Int
-](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
+](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32,):
     """
     GPU kernel for diagonal phase - processes tile (pivot, pivot).
     Matches cuda_diagonal_ from CUDA implementation.
@@ -943,7 +964,7 @@ def gpu_diagonal_kernel[
 
 def gpu_partially_independent_kernel[
     score_dtype: DType, tile_size: Int
-](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
+](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32,):
     """
     GPU kernel for partially independent phase.
     Processes row and column tiles relative to the diagonal tile.
@@ -1036,7 +1057,7 @@ def gpu_partially_independent_kernel[
 
 def gpu_independent_kernel[
     score_dtype: DType, tile_size: Int
-](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
+](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32,):
     """
     GPU kernel for independent phase - processes every tile off the pivot's row and column.
     Matches cuda_independent_ from CUDA implementation.
@@ -1122,7 +1143,9 @@ def gpu_independent_kernel[
 
 
 def compute_strongest_paths_gpu[
-    score_dtype: DType, tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
+    score_dtype: DType,
+    tile_size: Int = TILE_SIZE,
+    seed: SeedGraph = SeedGraph.winning_votes,
 ](preferences: PreferenceMatrix) raises -> VoteMatrix[score_dtype]:
     """
     Pure Mojo GPU implementation of Schulze strongest paths computation.
@@ -1242,7 +1265,10 @@ def strongest_paths_typed[
 def compute_strongest_paths[
     seed: SeedGraph = SeedGraph.winning_votes
 ](
-    preferences: PreferenceMatrix, *, backend: Backend = Backend.cpu, score_type: ScoreType = ScoreType.auto
+    preferences: PreferenceMatrix,
+    *,
+    backend: Backend = Backend.cpu,
+    score_type: ScoreType = ScoreType.auto,
 ) raises -> StrongestPathsMatrix:
     """Computes strongest paths using the selected device and arithmetic type."""
     var resolved = resolve_score_type[seed](preferences, score_type)
@@ -1263,7 +1289,10 @@ def compute_strongest_paths[
 
 
 def compute_split_cycle_winners(
-    preferences: PreferenceMatrix, *, backend: Backend = Backend.cpu, score_type: ScoreType = ScoreType.auto
+    preferences: PreferenceMatrix,
+    *,
+    backend: Backend = Backend.cpu,
+    score_type: ScoreType = ScoreType.auto,
 ) raises -> List[Int]:
     """
     Names the candidates nobody defeats, which is the Split Cycle winning set.

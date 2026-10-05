@@ -106,7 +106,10 @@ def build_pairwise_preferences(
     if num_candidates is None:
         num_candidates = 1 + max((int(np.max(ranking)) for ranking in rankings if len(ranking)), default=0)
     return tally_chunks(
-        [complete_rankings(rankings, num_candidates)], num_candidates, backend, implementation=implementation
+        [complete_rankings(rankings, num_candidates)],
+        num_candidates,
+        backend,
+        implementation=implementation,
     )
 
 

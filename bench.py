@@ -18,7 +18,10 @@ from ballots import generate_preferences
 
 
 def benchmark_implementation[Result](
-    callback: Callable[[np.ndarray], Result], inputs: np.ndarray, warmup: int, repeat: int
+    callback: Callable[[np.ndarray], Result],
+    inputs: np.ndarray,
+    warmup: int,
+    repeat: int,
 ) -> tuple[int, Result]:
     """Times complete calls and retains the last result for validation."""
     if repeat < 1:
@@ -49,8 +52,18 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark ballots, Schulze, and Kemeny-Young")
     parser.add_argument("--method", choices=("ballots", "schulze", "kemeny"), default="schulze")
     parser.add_argument("--num-candidates", type=int, default=128)
-    parser.add_argument("--num-voters", type=int, default=2000, help="0 draws matrix counts in [0, 350M]")
-    parser.add_argument("-k", "--filter", default=".", help="Comma-separated backend substrings, case-insensitive")
+    parser.add_argument(
+        "--num-voters",
+        type=int,
+        default=2000,
+        help="0 draws matrix counts in [0, 350M]",
+    )
+    parser.add_argument(
+        "-k",
+        "--filter",
+        default=".",
+        help="Comma-separated backend substrings, case-insensitive",
+    )
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)

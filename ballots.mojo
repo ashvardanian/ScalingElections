@@ -11,7 +11,13 @@ of each pairwise contest, which is where every Schulze backend starts.
 """
 
 from std.atomic import Atomic
-from std.memory import AddressSpace, Layout, alloc, stack_allocation, unsafe_memset_zero
+from std.memory import (
+    AddressSpace,
+    Layout,
+    alloc,
+    stack_allocation,
+    unsafe_memset_zero,
+)
 from std.random.philox import Random
 from std.sys import num_logical_cores
 
@@ -268,7 +274,10 @@ def tally_ballots_cpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
 
     def count_chunk(worker: Int) {imm}:
         var private_counts = counts_ptr.unsafe_offset(worker * cells)
-        for ballot in range(num_ballots * worker // workers, num_ballots * (worker + 1) // workers):
+        for ballot in range(
+            num_ballots * worker // workers,
+            num_ballots * (worker + 1) // workers,
+        ):
             var base = ballot * num_candidates
             for position in range(num_candidates - 1):
                 var preferred = Int(rankings[base + position])
@@ -324,7 +333,10 @@ def gpu_tally_kernel[
             var preferred = Int(rankings[unsafe_offset=base + position])
             for later in range(position + 1, num_candidates):
                 var opponent = Int(rankings[unsafe_offset=base + later])
-                _ = Atomic.fetch_add(counters.unsafe_offset(preferred * num_candidates + opponent), UInt32(1))
+                _ = Atomic.fetch_add(
+                    counters.unsafe_offset(preferred * num_candidates + opponent),
+                    UInt32(1),
+                )
         ballot += stride
     barrier()
 
@@ -393,7 +405,11 @@ def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
 
 
 def tally_ballots(
-    rankings: List[UInt32], num_ballots: Int, num_candidates: Int, *, backend: Backend = Backend.cpu
+    rankings: List[UInt32],
+    num_ballots: Int,
+    num_candidates: Int,
+    *,
+    backend: Backend = Backend.cpu,
 ) raises -> PreferenceMatrix:
     """Counts complete rankings using the selected device's default kernel."""
     return tally_ballots_gpu(rankings, num_ballots, num_candidates) if backend == Backend.gpu else tally_ballots_cpu(

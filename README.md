@@ -84,13 +84,15 @@ An electorate arrives in chunks rather than whole, so only the chunk in hand is 
   <img alt="Ballot tally rate against field size, log-log" src="assets/ballots-light.svg">
 </picture>
 
-| Variant                            | Kind  | 16 candidates | 32 candidates | 64 candidates | 128 candidates |
+| Variant                            |  Kind | 16 candidates | 32 candidates | 64 candidates | 128 candidates |
 | :--------------------------------- | :---: | ------------: | ------------: | ------------: | -------------: |
 | ScalingElections, 132× Nvidia SM90 |  GPU  |     115.3 M/s |      57.4 M/s |      28.1 M/s |              — |
 | ScalingElections, 16× Intel SPR    |  CPU  |     124.0 M/s |      32.1 M/s |       7.4 M/s |        1.7 M/s |
-| ScalingElections, 18× Apple M5 Pro |  CPU  |      48.8 M/s |      12.6 M/s |      3.17 M/s |       0.80 M/s |
-| ScalingElections, 20× Apple M5 Pro |  GPU  |      24.9 M/s |      13.3 M/s |      6.43 M/s |              — |
+| ScalingElections, 18× Nvidia SM103 |  GPU  |      28.3 M/s |      11.2 M/s |      4.16 M/s |              — |
+| ScalingElections, 18× Apple M5 Pro |  CPU  |      47.6 M/s |      12.3 M/s |      3.18 M/s |      0.797 M/s |
+| ScalingElections, 20× Apple M5 Pro |  GPU  |      24.3 M/s |      13.1 M/s |       6.6 M/s |              — |
 | Pref-Voting, 1× Intel SPR          |  CPU  |     0.044 M/s |     0.019 M/s |     0.007 M/s |      0.003 M/s |
+| Pref-Voting, 1× Apple M5 Pro       |  CPU  |    0.0774 M/s |    0.0323 M/s |    0.0112 M/s |    0.00354 M/s |
 |                                    |       |               |               |               |                |
 | 350M Ballots                       |       |         2.8 s |         6.1 s |        12.5 s |        201.1 s |
 
@@ -107,15 +109,17 @@ The field can be enormous, and voters cost nothing.
   <img alt="Schulze wall clock against field size, log-log" src="assets/schulze-light.svg">
 </picture>
 
-| Variant                            | Kind  |     512 candidates |      1K candidates |     4K candidates |    16K candidates |    64K candidates |
-| :--------------------------------- | :---: | -----------------: | -----------------: | ----------------: | ----------------: | ----------------: |
-| ScalingElections, 132× Nvidia SM90 |  GPU  |    3.2 ms · 43 GCs |   7.0 ms · 152 GCs |   94 ms · 729 GCs | 2.59 s · 1.70 TCs | 60.3 s · 4.66 TCs |
-| ScalingElections, 16× Intel SPR    |  CPU  |    2.2 ms · 60 GCs |     19 ms · 57 GCs |   1.17 s · 59 GCs |   69.8 s · 63 GCs |                 — |
-| ScalingElections, 18× Apple M5 Pro |  CPU  | 3.70 ms · 36.3 GCs | 24.2 ms · 44.4 GCs | 1.10 s · 62.2 GCs | 69.4 s · 63.3 GCs |                 — |
-| ScalingElections, 20× Apple M5 Pro |  GPU  | 3.07 ms · 43.8 GCs |  6.62 ms · 162 GCs |  209 ms · 329 GCs |  10.3 s · 428 GCs |                 — |
-| Pref-Voting, 1× Intel SPR          |  CPU  |   29.0 s · 4.6 MCs |      232 s · 5 MCs |                 — |                 — |                 — |
-|                                    |       |                    |                    |                   |                   |                   |
-| Memory Usage                       |       |             1.0 MB |             4.2 MB |           67.1 MB |           1.07 GB |           17.2 GB |
+| Variant                            |  Kind |     512 candidates |      1K candidates |     4K candidates |    16K candidates |     64K candidates |
+| :--------------------------------- | :---: | -----------------: | -----------------: | ----------------: | ----------------: | -----------------: |
+| ScalingElections, 132× Nvidia SM90 |  GPU  |    3.2 ms · 43 GCs |   7.0 ms · 152 GCs |   94 ms · 729 GCs | 2.59 s · 1.70 TCs |  60.3 s · 4.66 TCs |
+| ScalingElections, 16× Intel SPR    |  CPU  |    2.2 ms · 60 GCs |     19 ms · 57 GCs |   1.17 s · 59 GCs |   69.8 s · 63 GCs |                  — |
+| ScalingElections, 18× Nvidia SM103 |  GPU  | 1.52 ms · 88.5 GCs |  7.19 ms · 149 GCs |  240 ms · 286 GCs |  12.2 s · 359 GCs | 11.1 min · 423 GCs |
+| ScalingElections, 18× Apple M5 Pro |  CPU  | 3.57 ms · 37.6 GCs | 21.6 ms · 49.8 GCs |  1.1 s · 62.6 GCs | 71.8 s · 61.2 GCs |                  — |
+| ScalingElections, 20× Apple M5 Pro |  GPU  | 5.48 ms · 24.5 GCs |  9.34 ms · 115 GCs |  215 ms · 319 GCs |  10.2 s · 431 GCs |                  — |
+| Pref-Voting, 1× Intel SPR          |  CPU  |   29.0 s · 4.6 MCs |      232 s · 5 MCs |                 — |                 — |                  — |
+| Pref-Voting, 1× Apple M5 Pro       |  CPU  |  13.7 s · 9.77 MCs |   109 s · 9.81 MCs |                 — |                 — |                  — |
+|                                    |       |                    |                    |                   |                   |                    |
+| Memory Usage                       |       |             1.0 MB |             4.2 MB |           67.1 MB |           1.07 GB |            17.2 GB |
 
 > Measured 5 October 2026.
 
@@ -134,12 +138,13 @@ Voters are free: the summary is the same size whether ten thousand or a billion 
   <img alt="Kemeny wall clock against field size, semi-log" src="assets/kemeny-light.svg">
 </picture>
 
-| Variant                            | Kind  | 21 candidates | 24 candidates | 27 candidates | 30 candidates | 33 candidates |
+| Variant                            |  Kind | 21 candidates | 24 candidates | 27 candidates | 30 candidates | 33 candidates |
 | :--------------------------------- | :---: | ------------: | ------------: | ------------: | ------------: | ------------: |
 | ScalingElections, 132× Nvidia SM90 |  GPU  |          5 ms |         18 ms |        101 ms |        727 ms |        5.86 s |
 | ScalingElections, 16× Intel SPR    |  CPU  |         29 ms |        268 ms |        1.80 s |        16.0 s |       2.4 min |
-| ScalingElections, 18× Apple M5 Pro |  CPU  |       14.0 ms |        123 ms |        1.11 s |        11.0 s |             — |
-| ScalingElections, 20× Apple M5 Pro |  GPU  |       6.78 ms |       27.0 ms |        192 ms |        1.99 s |             — |
+| ScalingElections, 18× Nvidia SM103 |  GPU  |       2.22 ms |         13 ms |       83.1 ms |        695 ms |             — |
+| ScalingElections, 18× Apple M5 Pro |  CPU  |       16.4 ms |        132 ms |        1.22 s |        11.7 s |             — |
+| ScalingElections, 20× Apple M5 Pro |  GPU  |       10.2 ms |       26.8 ms |        221 ms |        2.19 s |             — |
 |                                    |       |               |               |               |               |               |
 | Memory Usage                       |       |       16.8 MB |        134 MB |       1.07 GB |       8.59 GB |       68.7 GB |
 
@@ -154,11 +159,15 @@ __And the subset program is not the fastest way to reach the field it can.__
 Kemeny's optimum is a minimum-weight feedback arc set, and an integer program over the triangle inequalities solves that directly.
 [Pref-Voting](https://pypi.org/project/pref-voting/) reaches the same optimum a third way, by walking all $N!$ orderings, which is where its column ends:
 
-| Variant                                 | 10 candidates | 21 candidates | 27 candidates | 33 candidates |
-| :-------------------------------------- | ------------: | ------------: | ------------: | ------------: |
-| ScalingElections, 132× Nvidia SM90 GPUs |        0.6 ms |          5 ms |        101 ms |        5.86 s |
-| iGraph `ip_ti`, 1× Intel SPR CPUs core  |        0.8 ms |         39 ms |        177 ms |        323 ms |
-| Pref-Voting, 1× Intel SPR CPUs          |        22.6 s |             — |             — |             — |
+| Variant                                 |  Kind | 10 candidates | 21 candidates | 27 candidates | 33 candidates |
+| :-------------------------------------- | :---: | ------------: | ------------: | ------------: | ------------: |
+| ScalingElections, 132× Nvidia SM90      |  GPU  |        0.6 ms |          5 ms |        101 ms |        5.86 s |
+| ScalingElections, 18× Nvidia SM103      |  GPU  |      0.147 ms |       2.22 ms |       83.1 ms |             — |
+| ScalingElections, 18× Apple M5 Pro      |  CPU  |      0.347 ms |       16.4 ms |        1.22 s |             — |
+| ScalingElections, 20× Apple M5 Pro      |  GPU  |       1.32 ms |       10.2 ms |        221 ms |             — |
+| iGraph `ip_ti`, 1× Intel SPR            |  CPU  |        0.8 ms |         39 ms |        177 ms |        323 ms |
+| Pref-Voting, 1× Intel SPR               |  CPU  |        22.6 s |             — |             — |             — |
+| Pref-Voting, 1× Apple M5 Pro            |  CPU  |        20.4 s |             — |             — |             — |
 
 > Measured 5 October 2026.
 

@@ -401,7 +401,10 @@ def compute_kemeny_ranking_gpu[
 
 
 def compute_kemeny_ranking(
-    preferences: PreferenceMatrix, *, backend: Backend = Backend.cpu, score_type: ScoreType = ScoreType.auto
+    preferences: PreferenceMatrix,
+    *,
+    backend: Backend = Backend.cpu,
+    score_type: ScoreType = ScoreType.auto,
 ) raises -> KemenySolution:
     """Dispatches exact ranking to the selected device and a safe compiled score width."""
     var resolved = resolve_score_type(preferences, score_type)

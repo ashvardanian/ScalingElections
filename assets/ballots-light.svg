@@ -1,41 +1,69 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="934" height="500" viewBox="0 0 934 500" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" role="img" aria-label="Ballot tally rate against field size, log-log">
-<rect width="934" height="500" rx="14" fill="#fcfcfb"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="934" height="522" viewBox="0 0 934 522" font-family="ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif" role="img" aria-label="Ballot tally rate against field size, log-log">
+<rect width="934" height="522" rx="14" fill="#fcfcfb"/>
 <text x="96" y="40" font-size="21" font-weight="650" fill="#0b0b0b">Ballots Into The Pairwise Matrix</text>
 <text x="96" y="62" font-size="13" fill="#52514e">Complete rankings folded into one matrix, privatized and merged once. Both axes logarithmic, higher is better.</text>
 <line x1="96" y1="404.0" x2="894" y2="404.0" stroke="#e7e6e2" stroke-width="1"/>
-<text x="84" y="408.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">0.01 M/s</text>
+<text x="84" y="408.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">0.001 M/s</text>
 <line x1="96" y1="360.0" x2="894" y2="360.0" stroke="#e7e6e2" stroke-width="1"/>
-<text x="84" y="364.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">0.1 M/s</text>
+<text x="84" y="364.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">0.01 M/s</text>
 <line x1="96" y1="316.0" x2="894" y2="316.0" stroke="#e7e6e2" stroke-width="1"/>
-<text x="84" y="320.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 M/s</text>
+<text x="84" y="320.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">0.1 M/s</text>
 <line x1="96" y1="272.0" x2="894" y2="272.0" stroke="#e7e6e2" stroke-width="1"/>
-<text x="84" y="276.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">10 M/s</text>
+<text x="84" y="276.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">1 M/s</text>
 <line x1="96" y1="228.0" x2="894" y2="228.0" stroke="#e7e6e2" stroke-width="1"/>
-<text x="84" y="232.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">100 M/s</text>
+<text x="84" y="232.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">10 M/s</text>
+<line x1="96" y1="184.0" x2="894" y2="184.0" stroke="#e7e6e2" stroke-width="1"/>
+<text x="84" y="188.0" font-size="11.5" text-anchor="end" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">100 M/s</text>
 <text x="125.6" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">16</text>
 <text x="371.9" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">32</text>
 <text x="618.1" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">64</text>
 <text x="864.4" y="424" font-size="11.5" text-anchor="middle" fill="#8a8984" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">128</text>
 <text x="495" y="448" font-size="12" text-anchor="middle" fill="#52514e">candidates on a ballot</text>
 <text x="20" y="250" font-size="12" text-anchor="middle" fill="#52514e" transform="rotate(-90 20 250)">ballots per second</text>
-<path d="M125.6,225.3 L371.9,238.6 L618.1,252.3" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="125.6" cy="225.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="371.9" cy="238.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="618.1" cy="252.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
-<path d="M125.6,223.9 L371.9,249.7 L618.1,277.8 L864.4,305.9" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="125.6" cy="223.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="371.9" cy="249.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="618.1" cy="277.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="864.4" cy="305.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
-<path d="M125.6,375.7 L371.9,391.7 L618.1,410.8 L864.4,427.0" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="125.6" cy="375.7" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="371.9" cy="391.7" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="618.1" cy="410.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="864.4" cy="427.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="218.0" cy="472" r="4" fill="#2a78d6"/>
-<text x="229.0" y="476" font-size="12.5" fill="#52514e">ScalingElections, 1x H100 GPU</text>
-<circle cx="430.8" cy="472" r="4" fill="#eb6834"/>
-<text x="441.8" y="476" font-size="12.5" fill="#52514e">ScalingElections, 16x SPR CPU</text>
-<circle cx="643.5" cy="472" r="4" fill="#1baf7a"/>
-<text x="654.5" y="476" font-size="12.5" fill="#52514e">Pref-Voting, 1x SPR</text>
+<path d="M125.6,181.3 L371.9,194.6 L618.1,208.3" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="181.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="371.9" cy="194.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.1" cy="208.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,179.9 L371.9,205.7 L618.1,233.8 L864.4,261.9" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="179.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="371.9" cy="205.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.1" cy="233.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="864.4" cy="261.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,208.1 L371.9,225.8 L618.1,244.8" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="208.1" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="371.9" cy="225.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.1" cy="244.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,198.2 L371.9,224.0 L618.1,249.9 L864.4,276.3" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="198.2" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="371.9" cy="224.0" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.1" cy="249.9" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="864.4" cy="276.3" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,211.0 L371.9,222.8 L618.1,235.9" fill="none" stroke="#9861d6" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="211.0" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="371.9" cy="222.8" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.1" cy="235.9" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,331.7 L371.9,347.7 L618.1,366.8 L864.4,383.0" fill="none" stroke="#c64f68" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="331.7" r="4" fill="#c64f68" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="371.9" cy="347.7" r="4" fill="#c64f68" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.1" cy="366.8" r="4" fill="#c64f68" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="864.4" cy="383.0" r="4" fill="#c64f68" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,320.9 L371.9,337.6 L618.1,357.8 L864.4,379.8" fill="none" stroke="#8c7853" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="320.9" r="4" fill="#8c7853" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="371.9" cy="337.6" r="4" fill="#8c7853" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="618.1" cy="357.8" r="4" fill="#8c7853" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="864.4" cy="379.8" r="4" fill="#8c7853" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="200.1" cy="472" r="4" fill="#2a78d6"/>
+<text x="211.1" y="476" font-size="12.5" fill="#52514e">132× SM90 GPU</text>
+<circle cx="325.1" cy="472" r="4" fill="#eb6834"/>
+<text x="336.1" y="476" font-size="12.5" fill="#52514e">16× SPR CPU</text>
+<circle cx="432.4" cy="472" r="4" fill="#1baf7a"/>
+<text x="443.4" y="476" font-size="12.5" fill="#52514e">18× SM103 GPU</text>
+<circle cx="557.4" cy="472" r="4" fill="#eda100"/>
+<text x="568.4" y="476" font-size="12.5" fill="#52514e">18× M5 Pro CPU</text>
+<circle cx="686.7" cy="472" r="4" fill="#9861d6"/>
+<text x="697.7" y="476" font-size="12.5" fill="#52514e">20× M5 Pro GPU</text>
+<circle cx="317.7" cy="494" r="4" fill="#c64f68"/>
+<text x="328.7" y="498" font-size="12.5" fill="#52514e">Pref-Voting, 1× SPR CPU</text>
+<circle cx="497.1" cy="494" r="4" fill="#8c7853"/>
+<text x="508.1" y="498" font-size="12.5" fill="#52514e">Pref-Voting, 1× M5 Pro CPU</text>
 </svg>

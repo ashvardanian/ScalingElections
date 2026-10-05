@@ -61,7 +61,10 @@ def compute_strongest_paths_serial(preferences: np.ndarray) -> np.ndarray:
                     if source != target and pivot != target:
                         strongest_paths[source, target] = max(
                             strongest_paths[source, target],
-                            min(strongest_paths[source, pivot], strongest_paths[pivot, target]),
+                            min(
+                                strongest_paths[source, pivot],
+                                strongest_paths[pivot, target],
+                            ),
                         )
 
     return strongest_paths
@@ -110,7 +113,8 @@ def process_tile_cpu(
                     and (right_row + pivot != right_column + column)
                 ):
                     replacement = min(
-                        left[left_row + row, left_column + pivot], right[right_row + pivot, right_column + column]
+                        left[left_row + row, left_column + pivot],
+                        right[right_row + pivot, right_column + column],
                     )
                     if replacement > output[output_row + row, output_column + column]:
                         output[output_row + row, output_column + column] = replacement
