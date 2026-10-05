@@ -19,35 +19,69 @@ from max.algorithm import parallelize
 from max.gpu import barrier, block_dim, block_idx, grid_dim, thread_idx
 from max.gpu.host import DeviceContext
 
+
+@fieldwise_init
+struct Backend(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegisterPassable):
+    var value: UInt8
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.value == other.value
+
+    def __ne__(self, other: Self) -> Bool:
+        return self.value != other.value
+
+    def name(self) -> String:
+        return String("CPU") if self == Self.cpu else String("GPU")
+
+    comptime cpu = Self(0)
+    comptime gpu = Self(1)
+
+
+@fieldwise_init
+struct ScoreType(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegisterPassable):
+    var bits: Int
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.bits == other.bits
+
+    def __ne__(self, other: Self) -> Bool:
+        return self.bits != other.bits
+
+    comptime auto = Self(0)
+    comptime uint16 = Self(16)
+    comptime uint32 = Self(32)
+    comptime uint64 = Self(64)
+
+
 # region Matrix
 
 
 @fieldwise_init
-struct VoteMatrix(Movable):
+struct VoteMatrix[score_dtype: DType = DType.uint32](Movable):
     """Dense square matrix of pairwise vote counts, indexed by a pair of candidates."""
 
-    var data: Pointer[UInt32, MutUntrackedOrigin]
+    var data: Pointer[SIMD[Self.score_dtype, 1], MutUntrackedOrigin]
     var num_candidates: Int
 
     def __init__(out self, num_candidates: Int):
         self.num_candidates = num_candidates
         var size = num_candidates * num_candidates
-        self.data = alloc(Layout[UInt32](count=size)).unsafe_leak()
+        self.data = alloc(Layout[SIMD[Self.score_dtype, 1]](count=size)).unsafe_leak()
         unsafe_memset_zero(self.data, size)
 
-    def __getitem__(self, row: Int, column: Int) -> UInt32:
+    def __getitem__(self, row: Int, column: Int) -> SIMD[Self.score_dtype, 1]:
         return self.data[unsafe_offset=row * self.num_candidates + column]
 
-    def __setitem__(mut self, row: Int, column: Int, value: UInt32):
+    def __setitem__(mut self, row: Int, column: Int, value: SIMD[Self.score_dtype, 1]):
         self.data[unsafe_offset=row * self.num_candidates + column] = value
 
     def __deinit__(deinit self):
         self.data.unsafe_free()
 
 
-comptime PreferenceMatrix = VoteMatrix
+comptime PreferenceMatrix = VoteMatrix[DType.uint32]
 """The two names read differently at a call site and denote the same storage."""
-comptime StrongestPathsMatrix = VoteMatrix
+comptime StrongestPathsMatrix = VoteMatrix[DType.uint32]
 
 # endregion Matrix
 
@@ -131,11 +165,9 @@ def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value
 # region Graph
 
 
-def winning_votes_graph(
-    preferences: PreferenceMatrix,
-    graph: Pointer[UInt32, MutUntrackedOrigin],
-    row_stride: Int,
-):
+def winning_votes_graph[
+    score_dtype: DType
+](preferences: PreferenceMatrix, graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], row_stride: Int,):
     """
     Seeds a strongest-paths graph with the winning side of each pairwise contest.
 
@@ -157,7 +189,7 @@ def winning_votes_graph(
                 var forward = preferences[row, column]
                 var backward = preferences[column, row]
                 if forward > backward:
-                    graph[unsafe_offset=row * row_stride + column] = forward
+                    graph[unsafe_offset=row * row_stride + column] = forward.cast[score_dtype]()
                 else:
                     graph[unsafe_offset=row * row_stride + column] = 0
 
@@ -182,11 +214,9 @@ struct SeedGraph(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegist
     """Positive margins, which is what Split Cycle is defined on."""
 
 
-def positive_margins_graph(
-    preferences: PreferenceMatrix,
-    graph: Pointer[UInt32, MutUntrackedOrigin],
-    row_stride: Int,
-):
+def positive_margins_graph[
+    score_dtype: DType
+](preferences: PreferenceMatrix, graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], row_stride: Int,):
     """
     Seeds a strongest-paths graph with each pair's positive margin.
 
@@ -202,14 +232,16 @@ def positive_margins_graph(
             var forward = preferences[row, column]
             var backward = preferences[column, row]
             var margin = forward - backward if row != column and forward > backward else UInt32(0)
-            graph[unsafe_offset=row * row_stride + column] = margin
+            graph[unsafe_offset=row * row_stride + column] = margin.cast[score_dtype]()
 
     parallelize(fill_row, num_candidates)
 
 
-def seed_graph(
+def seed_graph[
+    score_dtype: DType
+](
     preferences: PreferenceMatrix,
-    graph: Pointer[UInt32, MutUntrackedOrigin],
+    graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     row_stride: Int,
     which: SeedGraph,
 ):
@@ -320,6 +352,8 @@ def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
         raise Error("The GPU tally holds at most " + String(TALLY_MAX_CANDIDATES) + " candidates")
 
     var preferences = PreferenceMatrix(num_candidates)
+    if num_ballots == 0:
+        return preferences^
     var cells = num_candidates * num_candidates
     var total = num_ballots * num_candidates
 
@@ -356,3 +390,12 @@ def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
         preferences.data[unsafe_offset=cell] = counts_ptr[unsafe_offset=cell]
     deinit(host_counts^)
     return preferences^
+
+
+def tally_ballots(
+    rankings: List[UInt32], num_ballots: Int, num_candidates: Int, *, backend: Backend = Backend.cpu
+) raises -> PreferenceMatrix:
+    """Counts complete rankings using the selected device's default kernel."""
+    return tally_ballots_gpu(rankings, num_ballots, num_candidates) if backend == Backend.gpu else tally_ballots_cpu(
+        rankings, num_ballots, num_candidates
+    )

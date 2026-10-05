@@ -21,9 +21,12 @@ from max.gpu import barrier, block_idx, thread_idx
 from max.gpu.host import DeviceContext
 
 from ballots import (
+    Backend,
     PreferenceMatrix,
+    ScoreType,
     SeedGraph,
     StrongestPathsMatrix,
+    VoteMatrix,
     seed_graph,
 )
 
@@ -88,8 +91,8 @@ struct IndexedScore(Comparable, Copyable, Equatable, Movable):
 
 
 def compute_strongest_paths_serial[
-    seed: SeedGraph = SeedGraph.winning_votes
-](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    score_dtype: DType = DType.uint32, seed: SeedGraph = SeedGraph.winning_votes
+](preferences: PreferenceMatrix) raises -> VoteMatrix[score_dtype]:
     """
     Serial implementation of Schulze strongest paths computation.
 
@@ -103,7 +106,7 @@ def compute_strongest_paths_serial[
         StrongestPathsMatrix with computed strongest paths.
     """
     var num_candidates = preferences.num_candidates
-    var strongest_paths = StrongestPathsMatrix(num_candidates)
+    var strongest_paths = VoteMatrix[score_dtype](num_candidates)
 
     # Step 1: Initialize strongest paths
     seed_graph(preferences, strongest_paths.data, num_candidates, seed)
@@ -130,11 +133,11 @@ def compute_strongest_paths_serial[
 
 
 def process_tile_cpu[
-    tile_size: Int
+    score_dtype: DType, tile_size: Int
 ](
-    output: Pointer[UInt32, MutUntrackedOrigin],
-    left: Pointer[UInt32, MutUntrackedOrigin],
-    right: Pointer[UInt32, MutUntrackedOrigin],
+    output: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    left: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    right: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     output_row: Int,
     output_column: Int,
     left_column: Int,
@@ -182,11 +185,11 @@ def process_tile_cpu[
 
 
 def process_tile_cpu_simd_independent[
-    tile_size: Int, simd_width: Int
+    score_dtype: DType, tile_size: Int, simd_width: Int
 ](
-    output: Pointer[UInt32, MutUntrackedOrigin],
-    left: Pointer[UInt32, MutUntrackedOrigin],
-    right: Pointer[UInt32, MutUntrackedOrigin],
+    output: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    left: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    right: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     tile_stride: Int,
 ):
     """
@@ -218,7 +221,7 @@ def process_tile_cpu_simd_independent[
                 var right_lanes = right.unsafe_load[width=simd_width](right_offset)
 
                 # The left operand is one cell, shared by every lane
-                var left_lanes = SIMD[DType.uint32, simd_width](left_value)
+                var left_lanes = SIMD[score_dtype, simd_width](left_value)
 
                 var narrowed = min(left_lanes, right_lanes)
                 var widened = max(output_lanes, narrowed)
@@ -228,11 +231,11 @@ def process_tile_cpu_simd_independent[
 
 
 def process_tile_cpu_simd_diagonal[
-    tile_size: Int, simd_width: Int
+    score_dtype: DType, tile_size: Int, simd_width: Int
 ](
-    output: Pointer[UInt32, MutUntrackedOrigin],
-    left: Pointer[UInt32, MutUntrackedOrigin],
-    right: Pointer[UInt32, MutUntrackedOrigin],
+    output: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    left: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    right: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     output_row: Int,
     output_column: Int,
     left_column: Int,
@@ -274,7 +277,7 @@ def process_tile_cpu_simd_diagonal[
                 # Load SIMD vectors
                 var output_lanes = output.unsafe_load[width=simd_width](output_offset)
                 var right_lanes = right.unsafe_load[width=simd_width](right_offset)
-                var left_lanes = SIMD[DType.uint32, simd_width](left_value)
+                var left_lanes = SIMD[score_dtype, simd_width](left_value)
 
                 var narrowed = min(left_lanes, right_lanes)
 
@@ -289,9 +292,11 @@ def process_tile_cpu_simd_diagonal[
                 output.unsafe_store[width=simd_width](output_offset, mask.select(narrowed, output_lanes))
 
 
-def copy_tile_to_buffer(
-    source: Pointer[UInt32, MutUntrackedOrigin],
-    dest: Pointer[UInt32, MutUntrackedOrigin],
+def copy_tile_to_buffer[
+    score_dtype: DType
+](
+    source: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    dest: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     start_row: Int,
     start_column: Int,
     tile_size: Int,
@@ -310,9 +315,11 @@ def copy_tile_to_buffer(
                 dest[unsafe_offset=tile_row * tile_size + tile_column] = 0
 
 
-def copy_buffer_to_tile(
-    source: Pointer[UInt32, MutUntrackedOrigin],
-    dest: Pointer[UInt32, MutUntrackedOrigin],
+def copy_buffer_to_tile[
+    score_dtype: DType
+](
+    source: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    dest: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     start_row: Int,
     start_column: Int,
     tile_size: Int,
@@ -351,8 +358,8 @@ def tile_origin(tile_index: Int, tile_size: Int) -> Int:
 
 
 def compute_strongest_paths_tiled_cpu[
-    tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
-](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    score_dtype: DType = DType.uint32, tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
+](preferences: PreferenceMatrix) raises -> VoteMatrix[score_dtype]:
     """
     Tiled CPU implementation of Schulze strongest paths computation.
     Uses blocking for better cache utilization.
@@ -368,7 +375,7 @@ def compute_strongest_paths_tiled_cpu[
         StrongestPathsMatrix with computed strongest paths.
     """
     var num_candidates = preferences.num_candidates
-    var strongest_paths = StrongestPathsMatrix(num_candidates)
+    var strongest_paths = VoteMatrix[score_dtype](num_candidates)
 
     # Step 1: Initialize strongest paths
     seed_graph(preferences, strongest_paths.data, num_candidates, seed)
@@ -382,7 +389,7 @@ def compute_strongest_paths_tiled_cpu[
         var pivot_start = tile_origin(pivot, tile_size)
 
         # Dependent phase: process diagonal tile
-        var diagonal_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+        var diagonal_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
         copy_tile_to_buffer(
             strongest_paths.data,
@@ -393,7 +400,7 @@ def compute_strongest_paths_tiled_cpu[
             num_candidates,
         )
 
-        process_tile_cpu[tile_size](
+        process_tile_cpu[score_dtype, tile_size](
             diagonal_tile,
             diagonal_tile,
             diagonal_tile,
@@ -421,8 +428,8 @@ def compute_strongest_paths_tiled_cpu[
 
             var tile_start = tile_origin(tile, tile_size)
 
-            var output_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var right_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+            var output_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var right_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
             copy_tile_to_buffer(
                 strongest_paths.data,
@@ -441,7 +448,7 @@ def compute_strongest_paths_tiled_cpu[
                 num_candidates,
             )
 
-            process_tile_cpu[tile_size](
+            process_tile_cpu[score_dtype, tile_size](
                 output_tile,
                 output_tile,
                 right_tile,
@@ -471,8 +478,8 @@ def compute_strongest_paths_tiled_cpu[
 
             var tile_start = tile_origin(tile, tile_size)
 
-            var output_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var left_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+            var output_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var left_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
             copy_tile_to_buffer(
                 strongest_paths.data,
@@ -491,7 +498,7 @@ def compute_strongest_paths_tiled_cpu[
                 num_candidates,
             )
 
-            process_tile_cpu[tile_size](
+            process_tile_cpu[score_dtype, tile_size](
                 output_tile,
                 left_tile,
                 output_tile,
@@ -526,9 +533,9 @@ def compute_strongest_paths_tiled_cpu[
 
             var column_start = tile_origin(column_tile, tile_size)
 
-            var output_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var left_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var right_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+            var output_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var left_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var right_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
             copy_tile_to_buffer(
                 strongest_paths.data,
@@ -555,7 +562,7 @@ def compute_strongest_paths_tiled_cpu[
                 num_candidates,
             )
 
-            process_tile_cpu[tile_size](
+            process_tile_cpu[score_dtype, tile_size](
                 output_tile,
                 left_tile,
                 right_tile,
@@ -582,8 +589,8 @@ def compute_strongest_paths_tiled_cpu[
 
 
 def compute_strongest_paths_tiled_cpu_simd[
-    tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
-](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    score_dtype: DType = DType.uint32, tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
+](preferences: PreferenceMatrix) raises -> VoteMatrix[score_dtype]:
     """
     SIMD-vectorized tiled CPU implementation of Schulze strongest paths computation.
     Uses phase-specific SIMD tile processors for optimal vectorization and minimal branching.
@@ -607,7 +614,7 @@ def compute_strongest_paths_tiled_cpu_simd[
         == 0 else 1
     )
     var num_candidates = preferences.num_candidates
-    var strongest_paths = StrongestPathsMatrix(num_candidates)
+    var strongest_paths = VoteMatrix[score_dtype](num_candidates)
 
     # Step 1: Initialize strongest paths
     seed_graph(preferences, strongest_paths.data, num_candidates, seed)
@@ -621,7 +628,7 @@ def compute_strongest_paths_tiled_cpu_simd[
         var pivot_start = tile_origin(pivot, tile_size)
 
         # Diagonal phase: uses diagonal-aware SIMD processor
-        var diagonal_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+        var diagonal_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
         copy_tile_to_buffer(
             strongest_paths.data,
@@ -632,7 +639,7 @@ def compute_strongest_paths_tiled_cpu_simd[
             num_candidates,
         )
 
-        process_tile_cpu_simd_diagonal[tile_size, simd_width](
+        process_tile_cpu_simd_diagonal[score_dtype, tile_size, simd_width](
             diagonal_tile,
             diagonal_tile,
             diagonal_tile,
@@ -660,8 +667,8 @@ def compute_strongest_paths_tiled_cpu_simd[
             var tile_start = tile_origin(tile, tile_size)
 
             # Row tile, left of the diagonal tile
-            var output_row_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var right_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+            var output_row_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var right_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
             copy_tile_to_buffer(
                 strongest_paths.data,
@@ -680,7 +687,7 @@ def compute_strongest_paths_tiled_cpu_simd[
                 num_candidates,
             )
 
-            process_tile_cpu_simd_diagonal[tile_size, simd_width](
+            process_tile_cpu_simd_diagonal[score_dtype, tile_size, simd_width](
                 output_row_tile,
                 output_row_tile,
                 right_tile,
@@ -701,8 +708,8 @@ def compute_strongest_paths_tiled_cpu_simd[
             )
 
             # Column tile, above the diagonal tile
-            var output_column_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var left_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+            var output_column_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var left_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
             copy_tile_to_buffer(
                 strongest_paths.data,
@@ -721,7 +728,7 @@ def compute_strongest_paths_tiled_cpu_simd[
                 num_candidates,
             )
 
-            process_tile_cpu_simd_diagonal[tile_size, simd_width](
+            process_tile_cpu_simd_diagonal[score_dtype, tile_size, simd_width](
                 output_column_tile,
                 left_tile,
                 output_column_tile,
@@ -755,9 +762,9 @@ def compute_strongest_paths_tiled_cpu_simd[
 
             var column_start = tile_origin(column_tile, tile_size)
 
-            var output_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var left_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
-            var right_tile = stack_allocation[tile_size * tile_size, UInt32, alignment=64]()
+            var output_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var left_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
+            var right_tile = stack_allocation[tile_size * tile_size, SIMD[score_dtype, 1], alignment=64]()
 
             copy_tile_to_buffer(
                 strongest_paths.data,
@@ -786,7 +793,7 @@ def compute_strongest_paths_tiled_cpu_simd[
 
             # Use independent processor if not on diagonal, otherwise use diagonal processor
             if row_tile == column_tile:
-                process_tile_cpu_simd_diagonal[tile_size, simd_width](
+                process_tile_cpu_simd_diagonal[score_dtype, tile_size, simd_width](
                     output_tile,
                     left_tile,
                     right_tile,
@@ -797,7 +804,9 @@ def compute_strongest_paths_tiled_cpu_simd[
                     tile_size,
                 )
             else:
-                process_tile_cpu_simd_independent[tile_size, simd_width](output_tile, left_tile, right_tile, tile_size)
+                process_tile_cpu_simd_independent[score_dtype, tile_size, simd_width](
+                    output_tile, left_tile, right_tile, tile_size
+                )
 
             copy_buffer_to_tile(
                 output_tile,
@@ -818,16 +827,14 @@ def compute_strongest_paths_tiled_cpu_simd[
 
 # region GPU Kernels
 
-comptime SharedUInt32Ptr = Pointer[UInt32, MutUntrackedOrigin, address_space=AddressSpace.SHARED]
-
 
 @always_inline
 def process_tile_gpu_device[
-    tile_size: Int, phase: TilePhase
+    score_dtype: DType, tile_size: Int, phase: TilePhase
 ](
-    output_shared: SharedUInt32Ptr,
-    left_shared: SharedUInt32Ptr,
-    right_shared: SharedUInt32Ptr,
+    output_shared: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
+    left_shared: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
+    right_shared: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin, address_space=AddressSpace.SHARED],
     output_row: Int,
     output_column: Int,
     left_row: Int,
@@ -886,8 +893,8 @@ def process_tile_gpu_device[
 
 
 def gpu_diagonal_kernel[
-    tile_size: Int
-](graph: Pointer[UInt32, MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
+    score_dtype: DType, tile_size: Int
+](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
     """
     GPU kernel for diagonal phase - processes tile (pivot, pivot).
     Matches cuda_diagonal_ from CUDA implementation.
@@ -900,7 +907,7 @@ def gpu_diagonal_kernel[
     # Allocate shared memory for one tile
     var output_shared = stack_allocation[
         tile_size * tile_size,
-        UInt32,
+        SIMD[score_dtype, 1],
         address_space=AddressSpace.SHARED,
     ]()
 
@@ -913,7 +920,7 @@ def gpu_diagonal_kernel[
     barrier()
 
     # Process tile (all three inputs are the same tile, need synchronization)
-    process_tile_gpu_device[tile_size, TilePhase.aliased](
+    process_tile_gpu_device[score_dtype, tile_size, TilePhase.aliased](
         output_shared,
         output_shared,
         output_shared,
@@ -935,8 +942,8 @@ def gpu_diagonal_kernel[
 
 
 def gpu_partially_independent_kernel[
-    tile_size: Int
-](graph: Pointer[UInt32, MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
+    score_dtype: DType, tile_size: Int
+](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
     """
     GPU kernel for partially independent phase.
     Processes row and column tiles relative to the diagonal tile.
@@ -954,17 +961,17 @@ def gpu_partially_independent_kernel[
     # Allocate shared memory for three tiles
     var left_shared = stack_allocation[
         tile_size * tile_size,
-        UInt32,
+        SIMD[score_dtype, 1],
         address_space=AddressSpace.SHARED,
     ]()
     var right_shared = stack_allocation[
         tile_size * tile_size,
-        UInt32,
+        SIMD[score_dtype, 1],
         address_space=AddressSpace.SHARED,
     ]()
     var output_shared = stack_allocation[
         tile_size * tile_size,
-        UInt32,
+        SIMD[score_dtype, 1],
         address_space=AddressSpace.SHARED,
     ]()
 
@@ -978,7 +985,7 @@ def gpu_partially_independent_kernel[
 
     barrier()
 
-    process_tile_gpu_device[tile_size, TilePhase.aliased](
+    process_tile_gpu_device[score_dtype, tile_size, TilePhase.aliased](
         output_shared,
         output_shared,
         right_shared,
@@ -1007,7 +1014,7 @@ def gpu_partially_independent_kernel[
 
     barrier()
 
-    process_tile_gpu_device[tile_size, TilePhase.aliased](
+    process_tile_gpu_device[score_dtype, tile_size, TilePhase.aliased](
         output_shared,
         left_shared,
         output_shared,
@@ -1028,8 +1035,8 @@ def gpu_partially_independent_kernel[
 
 
 def gpu_independent_kernel[
-    tile_size: Int
-](graph: Pointer[UInt32, MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
+    score_dtype: DType, tile_size: Int
+](graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], padded_edge: Int32, pivot_tile: Int32):
     """
     GPU kernel for independent phase - processes every tile off the pivot's row and column.
     Matches cuda_independent_ from CUDA implementation.
@@ -1047,17 +1054,17 @@ def gpu_independent_kernel[
     # Allocate shared memory for three tiles
     var left_shared = stack_allocation[
         tile_size * tile_size,
-        UInt32,
+        SIMD[score_dtype, 1],
         address_space=AddressSpace.SHARED,
     ]()
     var right_shared = stack_allocation[
         tile_size * tile_size,
-        UInt32,
+        SIMD[score_dtype, 1],
         address_space=AddressSpace.SHARED,
     ]()
     var output_shared = stack_allocation[
         tile_size * tile_size,
-        UInt32,
+        SIMD[score_dtype, 1],
         address_space=AddressSpace.SHARED,
     ]()
 
@@ -1076,7 +1083,7 @@ def gpu_independent_kernel[
 
     # Process tile - use diagonal check if row_tile == column_tile, no synchronization needed (different tiles)
     if row_tile == column_tile:
-        process_tile_gpu_device[tile_size, TilePhase.distinct_diagonal](
+        process_tile_gpu_device[score_dtype, tile_size, TilePhase.distinct_diagonal](
             output_shared,
             left_shared,
             right_shared,
@@ -1088,7 +1095,7 @@ def gpu_independent_kernel[
             column_tile * tile_size,
         )
     else:
-        process_tile_gpu_device[tile_size, TilePhase.distinct_independent](
+        process_tile_gpu_device[score_dtype, tile_size, TilePhase.distinct_independent](
             output_shared,
             left_shared,
             right_shared,
@@ -1115,8 +1122,8 @@ def gpu_independent_kernel[
 
 
 def compute_strongest_paths_gpu[
-    tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
-](preferences: PreferenceMatrix) raises -> StrongestPathsMatrix:
+    score_dtype: DType, tile_size: Int = TILE_SIZE, seed: SeedGraph = SeedGraph.winning_votes
+](preferences: PreferenceMatrix) raises -> VoteMatrix[score_dtype]:
     """
     Pure Mojo GPU implementation of Schulze strongest paths computation.
 
@@ -1134,7 +1141,7 @@ def compute_strongest_paths_gpu[
         StrongestPathsMatrix with computed strongest paths.
     """
     var num_candidates = preferences.num_candidates
-    var result = StrongestPathsMatrix(num_candidates)
+    var result = VoteMatrix[score_dtype](num_candidates)
 
     # Rounding up to a whole number of tiles keeps the kernels free of tail checks: the
     # padding is zero, which is the identity of the max-min semiring.
@@ -1142,8 +1149,8 @@ def compute_strongest_paths_gpu[
     var padded = num_tiles * tile_size
 
     var ctx = DeviceContext()
-    var host_graph = ctx.enqueue_create_host_buffer[DType.uint32](padded * padded)
-    var device_graph = ctx.enqueue_create_buffer[DType.uint32](padded * padded)
+    var host_graph = ctx.enqueue_create_host_buffer[score_dtype](padded * padded)
+    var device_graph = ctx.enqueue_create_buffer[score_dtype](padded * padded)
     ctx.synchronize()
     var host_ptr = host_graph.unsafe_ptr()
     unsafe_memset_zero(host_ptr, padded * padded)
@@ -1157,7 +1164,7 @@ def compute_strongest_paths_gpu[
 
     for pivot in range(num_tiles):
         # Phase 1: Diagonal tile (sequential, 1 block)
-        ctx.enqueue_function[gpu_diagonal_kernel[tile_size]](
+        ctx.enqueue_function[gpu_diagonal_kernel[score_dtype, tile_size]](
             graph_ptr,
             Int32(padded),
             Int32(pivot),
@@ -1166,7 +1173,7 @@ def compute_strongest_paths_gpu[
         )
 
         # Phase 2: Partially independent tiles (num_tiles blocks)
-        ctx.enqueue_function[gpu_partially_independent_kernel[tile_size]](
+        ctx.enqueue_function[gpu_partially_independent_kernel[score_dtype, tile_size]](
             graph_ptr,
             Int32(padded),
             Int32(pivot),
@@ -1175,7 +1182,7 @@ def compute_strongest_paths_gpu[
         )
 
         # Phase 3: Independent tiles (num_tiles x num_tiles blocks)
-        ctx.enqueue_function[gpu_independent_kernel[tile_size]](
+        ctx.enqueue_function[gpu_independent_kernel[score_dtype, tile_size]](
             graph_ptr,
             Int32(padded),
             Int32(pivot),
@@ -1202,14 +1209,62 @@ def compute_strongest_paths_gpu[
 # endregion GPU Driver
 
 
+def resolve_score_type[
+    seed: SeedGraph = SeedGraph.winning_votes
+](preferences: PreferenceMatrix, requested_type: ScoreType = ScoreType.auto) raises -> ScoreType:
+    """Resolves the path type before converting the graph to its storage width."""
+    if requested_type == ScoreType.auto:
+        return ScoreType.uint32
+    if requested_type == ScoreType.uint16:
+        for row in range(preferences.num_candidates):
+            for column in range(preferences.num_candidates):
+                var edge = preferences[row, column]
+                comptime if seed == SeedGraph.positive_margins:
+                    var reverse = preferences[column, row]
+                    edge = edge - reverse if edge > reverse else UInt32(0)
+                if edge > UInt32(UInt16.MAX):
+                    raise Error("Schulze paths exceed the selected arithmetic type")
+    return requested_type
+
+
+def strongest_paths_typed[
+    score_dtype: DType, seed: SeedGraph
+](preferences: PreferenceMatrix, backend: Backend) raises -> StrongestPathsMatrix:
+    var paths = compute_strongest_paths_gpu[score_dtype, TILE_SIZE, seed](
+        preferences
+    ) if backend == Backend.gpu else compute_strongest_paths_tiled_cpu_simd[score_dtype, TILE_SIZE, seed](preferences)
+    var result = StrongestPathsMatrix(preferences.num_candidates)
+    for cell in range(preferences.num_candidates * preferences.num_candidates):
+        result.data[unsafe_offset=cell] = paths.data[unsafe_offset=cell].cast[DType.uint32]()
+    return result^
+
+
+def compute_strongest_paths[
+    seed: SeedGraph = SeedGraph.winning_votes
+](
+    preferences: PreferenceMatrix, *, backend: Backend = Backend.cpu, score_type: ScoreType = ScoreType.auto
+) raises -> StrongestPathsMatrix:
+    """Computes strongest paths using the selected device and arithmetic type."""
+    var resolved = resolve_score_type[seed](preferences, score_type)
+    if resolved == ScoreType.uint16:
+        return strongest_paths_typed[DType.uint16, seed](preferences, backend)
+    if resolved == ScoreType.uint32:
+        return compute_strongest_paths_gpu[DType.uint32, TILE_SIZE, seed](
+            preferences
+        ) if backend == Backend.gpu else compute_strongest_paths_tiled_cpu_simd[DType.uint32, TILE_SIZE, seed](
+            preferences
+        )
+    if resolved == ScoreType.uint64:
+        return strongest_paths_typed[DType.uint64, seed](preferences, backend)
+    raise Error("Invalid score type")
+
+
 # region Results
 
 
-def split_cycle_winners[
-    strongest_margin_paths: def(PreferenceMatrix) raises thin -> StrongestPathsMatrix = (
-        compute_strongest_paths_tiled_cpu_simd[TILE_SIZE, SeedGraph.positive_margins]
-    )
-](preferences: PreferenceMatrix) raises -> List[Int]:
+def compute_split_cycle_winners(
+    preferences: PreferenceMatrix, *, backend: Backend = Backend.cpu, score_type: ScoreType = ScoreType.auto
+) raises -> List[Int]:
     """
     Names the candidates nobody defeats, which is the Split Cycle winning set.
 
@@ -1217,16 +1272,15 @@ def split_cycle_winners[
     and exceeds the widest path running back the other way. The set is irresolute by Theorem 4.7,
     so it can name several winners where Schulze names one.
 
-    Parameters:
-        strongest_margin_paths: Any driver seeded on positive margins, host or device.
-
     Args:
         preferences: Pairwise vote counts.
 
     Returns:
         The undefeated candidates, in increasing order.
     """
-    var margin_paths = strongest_margin_paths(preferences)
+    var margin_paths = compute_strongest_paths[SeedGraph.positive_margins](
+        preferences, backend=backend, score_type=score_type
+    )
     var num_candidates = preferences.num_candidates
     var undefeated = List[Int]()
 

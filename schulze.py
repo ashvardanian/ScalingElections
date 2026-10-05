@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 from numba import njit, prange
 
-from ballots import positive_margins
+from ballots import ScoreType, positive_margins
 
 # Suppress Numba TBB threading layer warnings
 warnings.filterwarnings("ignore", message=".*TBB threading layer.*")
@@ -19,11 +19,21 @@ TILE_SIZE = 32
 """The tile edge every backend is compiled for, matching `tile_size_k` in `types.cuh`."""
 
 
+def resolve_score_type(preferences: np.ndarray, score_type: ScoreType = ScoreType.auto) -> ScoreType:
+    """Select arithmetic that represents every path edge; max-min never increases its maximum."""
+    score_type = ScoreType(score_type)
+    if score_type is ScoreType.auto:
+        score_type = ScoreType.uint32
+    if np.max(preferences) > np.iinfo(np.dtype(score_type.value)).max:
+        raise OverflowError("Schulze edge exceeds the selected arithmetic type")
+    return score_type
+
+
 # region Serial
 
 
 @njit
-def compute_strongest_paths_numba_serial(preferences: np.ndarray) -> np.ndarray:
+def compute_strongest_paths_serial(preferences: np.ndarray) -> np.ndarray:
     """
     Computes the widest path strengths using the Schulze method.
 
@@ -32,7 +42,7 @@ def compute_strongest_paths_numba_serial(preferences: np.ndarray) -> np.ndarray:
     """
     num_candidates = preferences.shape[0]
 
-    strongest_paths = np.zeros((num_candidates, num_candidates), dtype=np.uint32)
+    strongest_paths = np.zeros((num_candidates, num_candidates), dtype=preferences.dtype)
 
     # Step 1: Populate the strongest paths matrix based on direct comparisons
     for source in range(num_candidates):
@@ -64,7 +74,7 @@ def compute_strongest_paths_numba_serial(preferences: np.ndarray) -> np.ndarray:
 
 
 @njit
-def compute_strongest_paths_tile_numba(
+def process_tile_cpu(
     output: np.ndarray,
     output_row: int,
     output_column: int,
@@ -107,7 +117,7 @@ def compute_strongest_paths_tile_numba(
 
 
 @njit(parallel=True)
-def compute_strongest_paths_numba_parallel(
+def compute_strongest_paths_tiled_cpu(
     preferences: np.ndarray,
     tile_size: int = TILE_SIZE,
 ) -> np.ndarray:
@@ -121,7 +131,7 @@ def compute_strongest_paths_numba_parallel(
     """
     num_candidates = preferences.shape[0]
 
-    strongest_paths = np.zeros((num_candidates, num_candidates), dtype=np.uint32)
+    strongest_paths = np.zeros((num_candidates, num_candidates), dtype=preferences.dtype)
 
     # Step 1: Populate the strongest paths matrix based on direct comparisons
     for source in range(num_candidates):
@@ -139,7 +149,7 @@ def compute_strongest_paths_numba_parallel(
         pivot_start = pivot_tile * tile_size
 
         # f(S_kk, S_kk, S_kk)
-        compute_strongest_paths_tile_numba(
+        process_tile_cpu(
             strongest_paths,
             pivot_start,
             pivot_start,
@@ -158,7 +168,7 @@ def compute_strongest_paths_numba_parallel(
                 continue
             row_start = row_tile * tile_size
             # f(S_ik, S_ik, S_kk)
-            compute_strongest_paths_tile_numba(
+            process_tile_cpu(
                 strongest_paths,
                 row_start,
                 pivot_start,
@@ -177,7 +187,7 @@ def compute_strongest_paths_numba_parallel(
                 continue
             column_start = column_tile * tile_size
             # f(S_kj, S_kk, S_kj)
-            compute_strongest_paths_tile_numba(
+            process_tile_cpu(
                 strongest_paths,
                 pivot_start,
                 column_start,
@@ -200,7 +210,7 @@ def compute_strongest_paths_numba_parallel(
                     continue
                 column_start = column_tile * tile_size
                 # f(S_ij, S_ik, S_kj)
-                compute_strongest_paths_tile_numba(
+                process_tile_cpu(
                     strongest_paths,
                     row_start,
                     column_start,
@@ -222,7 +232,7 @@ def compute_strongest_paths_numba_parallel(
 # region Winners
 
 
-def split_cycle_winners(preferences: np.ndarray, margin_paths: np.ndarray) -> list[int]:
+def select_split_cycle_winners(preferences: np.ndarray, margin_paths: np.ndarray) -> list[int]:
     """
     Determines the Split Cycle winners, which are the candidates nobody defeats.
 
@@ -238,8 +248,8 @@ def split_cycle_winners(preferences: np.ndarray, margin_paths: np.ndarray) -> li
     return [candidate for candidate in range(preferences.shape[0]) if not defeats[:, candidate].any()]
 
 
-def get_winner_and_ranking(
-    candidates: list,
+def compute_election_results(
+    candidates: list[int],
     strongest_paths: np.ndarray,
 ) -> tuple[int, list[int]]:
     """

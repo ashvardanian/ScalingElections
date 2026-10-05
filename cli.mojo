@@ -4,29 +4,18 @@ Input generation is excluded; timings include allocations, transfers, and recons
 Run `pixi run bench --help` for method, backend, and repetition selectors.
 """
 
+from std.collections import StringDict
 from std.random.philox import Random
 from std.sys import argv, has_accelerator, num_logical_cores
 from std.time import perf_counter_ns
 
 from max.gpu.host import DeviceContext
 
-from ballots import (
-    PreferenceMatrix,
-    SeedGraph,
-    TALLY_MAX_CANDIDATES,
-    generate_random_preferences,
-    tally_ballots_cpu,
-    tally_ballots_gpu,
-)
-from kemeny import KemenySolution, kemeny_ranking, kemeny_ranking_gpu
-from schulze import (
-    TILE_SIZE,
-    compute_election_results,
-    compute_strongest_paths_gpu,
-    compute_strongest_paths_serial,
-    compute_strongest_paths_tiled_cpu,
-    compute_strongest_paths_tiled_cpu_simd,
-)
+import ballots
+import kemeny
+import schulze
+from ballots import Backend, PreferenceMatrix, ScoreType
+from kemeny import KemenySolution
 
 
 def profile[
@@ -77,23 +66,18 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
             rankings[base + chosen] = held
 
     var baseline = PreferenceMatrix(0)
-    var backends: List[String] = ["CPU", "GPU"]
+    var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     for backend in backends:
-        if not selected_by(selector, backend):
+        if not selected_by(selector, backend.name()):
             continue
-        if backend == "GPU" and n > TALLY_MAX_CANDIDATES:
-            print("GPU tally supports at most", TALLY_MAX_CANDIDATES, "candidates")
-            continue
-        if backend == "GPU" and not has_accelerator():
+        if backend == Backend.gpu and not has_accelerator():
             print("GPU unavailable")
             continue
 
         def calculate() raises {imm} -> PreferenceMatrix:
-            return tally_ballots_gpu(rankings, voters, n) if backend == "GPU" else tally_ballots_cpu(
-                rankings, voters, n
-            )
+            return ballots.tally_ballots(rankings, voters, n, backend=backend)
 
-        var result = profile[PreferenceMatrix](backend, calculate, warmup, repeat, Float64(voters), "ballots/s")
+        var result = profile[PreferenceMatrix](backend.name(), calculate, warmup, repeat, Float64(voters), "ballots/s")
         for row in range(n):
             if result[row, row] != 0:
                 raise Error("Nonzero tally diagonal")
@@ -108,55 +92,53 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
         raise Error("No selected backend could run")
 
 
-def run_schulze(preferences: PreferenceMatrix, selector: String, warmup: Int, repeat: Int) raises:
+def run_schulze(
+    preferences: PreferenceMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType
+) raises:
+    print("Score bits:", schulze.resolve_score_type(preferences, score_type).bits)
     var baseline = PreferenceMatrix(0)
-    var backends: List[String] = ["Serial", "Tiled CPU", "Tiled CPU+SIMD", "Tiled GPU"]
+    var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     var n = preferences.num_candidates
     for backend in backends:
-        if not selected_by(selector, backend):
+        if not selected_by(selector, backend.name()):
             continue
-        if "GPU" in backend and not has_accelerator():
+        if backend == Backend.gpu and not has_accelerator():
             print("GPU unavailable")
             continue
 
         def calculate() raises {imm} -> PreferenceMatrix:
-            if backend == "Serial":
-                return compute_strongest_paths_serial[SeedGraph.winning_votes](preferences)
-            if backend == "Tiled CPU":
-                return compute_strongest_paths_tiled_cpu[TILE_SIZE](preferences)
-            if backend == "Tiled CPU+SIMD":
-                return compute_strongest_paths_tiled_cpu_simd[TILE_SIZE](preferences)
-            return compute_strongest_paths_gpu[TILE_SIZE](preferences)
+            return schulze.compute_strongest_paths(preferences, backend=backend, score_type=score_type)
 
-        var result = profile[PreferenceMatrix](backend, calculate, warmup, repeat, Float64(n) ** 3, "cells/s")
+        var result = profile[PreferenceMatrix](backend.name(), calculate, warmup, repeat, Float64(n) ** 3, "cells/s")
         if baseline.num_candidates:
             check_matrix(result, baseline)
         else:
             baseline = result^
     if baseline.num_candidates == 0:
         raise Error("No selected backend could run")
-    var outcome = compute_election_results(baseline)
+    var outcome = schulze.compute_election_results(baseline)
     var top = List[Int]()
     for place in range(min(5, len(outcome.ranking))):
         top.append(outcome.ranking[place])
     print("Winner:", outcome.winner, "Top candidates:", top)
 
 
-def run_kemeny(preferences: PreferenceMatrix, selector: String, warmup: Int, repeat: Int) raises:
-    var baseline = KemenySolution(List[Int](), -1)
-    var backends: List[String] = ["CPU", "GPU"]
+def run_kemeny(preferences: PreferenceMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType) raises:
+    print("Score bits:", kemeny.resolve_score_type(preferences, score_type).bits)
+    var baseline = KemenySolution(List[Int](), 0)
+    var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     var n = preferences.num_candidates
     for backend in backends:
-        if not selected_by(selector, backend):
+        if not selected_by(selector, backend.name()):
             continue
-        if backend == "GPU" and not has_accelerator():
+        if backend == Backend.gpu and not has_accelerator():
             print("GPU unavailable")
             continue
 
         def calculate() raises {imm} -> KemenySolution:
-            return kemeny_ranking_gpu(preferences) if backend == "GPU" else kemeny_ranking(preferences)
+            return kemeny.compute_kemeny_ranking(preferences, backend=backend, score_type=score_type)
 
-        var result = profile[KemenySolution](backend, calculate, warmup, repeat, 0, "")
+        var result = profile[KemenySolution](backend.name(), calculate, warmup, repeat, 0, "")
         var score = UInt64(0)
         var seen = UInt64(0)
         for earlier in range(n):
@@ -168,13 +150,13 @@ def run_kemeny(preferences: PreferenceMatrix, selector: String, warmup: Int, rep
                 score += UInt64(preferences[result.ranking[later], candidate])
         if score != UInt64(result.score):
             raise Error("Kemeny ranking disagrees with its score")
-        if baseline.score >= 0:
+        if len(baseline.ranking):
             if result.score != baseline.score or result.ranking != baseline.ranking:
                 raise Error("Backend Kemeny results disagree")
             print("  ✓ Rankings and scores match")
         else:
             baseline = result^
-    if baseline.score < 0:
+    if not len(baseline.ranking):
         raise Error("No selected backend could run")
     print("Score:", baseline.score, "Ranking:", baseline.ranking)
 
@@ -241,6 +223,7 @@ def reject_unknown_flags(
     """Rejects unrecognized flags, so a typo cannot silently use defaults."""
     var valued: List[String] = [
         "--method",
+        "--score-bits",
         "--num-candidates",
         "--num-voters",
         "--warmup",
@@ -275,10 +258,11 @@ comptime USAGE = """Usage: scalingelections [OPTIONS]
   --num-candidates N   Number of candidates (default: 128)
   --num-voters N       Number of voters (default: 2000); 0 draws matrix counts in [0, 350M]
   -k, --filter TEXT    Comma-separated backend substrings, case-insensitive (default: all)
-                      Ballots/Kemeny: CPU, GPU; Schulze: Serial, Tiled CPU, Tiled CPU+SIMD, Tiled GPU
+                      Backends: CPU, GPU
   --warmup N           Warmup iterations (default: 1)
   --repeat N           Measured iterations (default: 1)
   --seed N             Reproducible input seed (default: 42)
+  --score-bits N       Solver arithmetic: auto, 16, 32, or 64 (default: auto)
   --help, -h           Show help
 """
 
@@ -295,26 +279,38 @@ def main() raises:
     var warmup = parse_int_arg(args, "--warmup", 1)
     var repeat = parse_int_arg(args, "--repeat", 1)
     var seed = parse_int_arg(args, "--seed", 42)
+    var requested_type = parse_text_arg(args, "--score-bits", "auto")
+    var score_type = ScoreType.auto
+    if requested_type == "16":
+        score_type = ScoreType.uint16
+    elif requested_type == "32":
+        score_type = ScoreType.uint32
+    elif requested_type == "64":
+        score_type = ScoreType.uint64
+    elif requested_type != "auto":
+        raise Error("--score-bits must be auto, 16, 32, or 64")
     var selector = parse_text_arg(args, "--filter", ".")
     selector = parse_text_arg(args, "-k", selector)
     if n < 1 or voters < 0 or warmup < 0 or repeat < 1:
         raise Error("Candidates and repeat must be positive; voters and warmup cannot be negative")
     if method != "ballots" and method != "schulze" and method != "kemeny":
         raise Error("--method must be ballots, schulze, or kemeny")
+    if method == "ballots" and has_flag(args, "--score-bits"):
+        raise Error("--score-bits applies only to Schulze and Kemeny")
     if method == "ballots" and voters == 0:
         raise Error("--num-voters must be positive for ballot benchmarks")
     if method == "kemeny" and n > 33:
         raise Error("Kemeny supports at most 33 candidates")
     print("Method:", method, "Candidates:", n, "Voters:", voters, "Seed:", seed)
     print("Warmup:", warmup, "Repeat:", repeat, "CPU threads:", num_logical_cores())
-    if has_accelerator():
+    if selected_by(selector, "GPU") and has_accelerator():
         var ctx = DeviceContext()
         print("GPU:", ctx.name())
     if method == "ballots":
         run_ballots(n, voters, seed, selector, warmup, repeat)
-    else:
-        var preferences = generate_random_preferences(n, voters, seed)
-        if method == "schulze":
-            run_schulze(preferences, selector, warmup, repeat)
-        else:
-            run_kemeny(preferences, selector, warmup, repeat)
+        return
+    var preferences = ballots.generate_random_preferences(n, voters, seed)
+    var solvers = StringDict[def(PreferenceMatrix, String, Int, Int, ScoreType) raises thin -> None]()
+    solvers["schulze"] = run_schulze
+    solvers["kemeny"] = run_kemeny
+    solvers[method](preferences, selector, warmup, repeat, score_type)

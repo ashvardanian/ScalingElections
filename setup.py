@@ -59,7 +59,7 @@ def detect_cuda_archs():
 HEADERS = ["types.cuh", "ballots.cuh", "schulze.cuh", "kemeny.cuh"]
 
 
-def cccl_include() -> list:
+def cccl_include() -> list[str]:
     """A host-only build needs libcu++'s `mdspan` where the standard library has none of its own."""
     roots = [
         os.path.join(CUDA_HOME, "include"),

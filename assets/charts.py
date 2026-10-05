@@ -140,7 +140,7 @@ def render(options: argparse.Namespace, theme: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("name", help="Basename for the pair, written as <name>-light.svg and <name>-dark.svg")
     parser.add_argument("--title", required=True)
     parser.add_argument("--subtitle", required=True)

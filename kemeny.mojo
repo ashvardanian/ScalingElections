@@ -13,7 +13,7 @@ from max.algorithm import parallelize
 from max.gpu import block_dim, block_idx, thread_idx
 from max.gpu.host import DeviceContext
 
-from ballots import PreferenceMatrix
+from ballots import Backend, PreferenceMatrix, ScoreType
 
 # region Kemeny
 
@@ -21,15 +21,14 @@ from ballots import PreferenceMatrix
 comptime KEMENY_MAX_CANDIDATES = 33
 """The widest field an exact table can address, bounded by memory rather than by time."""
 
-comptime KemenyScore = UInt64
-"""Pairwise disagreements summed, bounded by `voters * n * (n - 1) / 2`, which 64 bits hold."""
-
 comptime KEMENY_LAYER_CHUNK = 4096
 """Colex ranks one worker takes at a time, so a layer costs one closure call per chunk."""
 
 
-def accumulate_subset_sums(
-    mut table: List[KemenyScore],
+def accumulate_subset_sums[
+    score_dtype: DType
+](
+    mut table: List[SIMD[score_dtype, 1]],
     base: Int,
     states: Int,
     preferences: PreferenceMatrix,
@@ -40,7 +39,10 @@ def accumulate_subset_sums(
     var offset = 0
     var bit = 1
     while bit < states:
-        var votes = KemenyScore(preferences[candidate, first_opponent + offset])
+        var opponent = first_opponent + offset
+        var votes = SIMD[score_dtype, 1](preferences[candidate, opponent]) if candidate != opponent else SIMD[
+            score_dtype, 1
+        ](0)
         for subset in range(bit, states):
             if subset & bit:
                 table[base + subset] = table[base + (subset ^ bit)] + votes
@@ -48,15 +50,15 @@ def accumulate_subset_sums(
         bit <<= 1
 
 
-struct KemenySums(Movable):
+struct KemenySums[score_dtype: DType = DType.uint64](Movable):
     """Votes each candidate loses to every subset of the others.
 
     One table would be `n * 2^n` wide. Splitting the subset into a low and a high half makes
     two of `n * 2^(n/2)`, small enough to stay in cache while the score table streams past.
     """
 
-    var low: List[KemenyScore]
-    var high: List[KemenyScore]
+    var low: List[SIMD[Self.score_dtype, 1]]
+    var high: List[SIMD[Self.score_dtype, 1]]
     var low_bits: Int
     var low_states: Int
     var high_states: Int
@@ -66,9 +68,9 @@ struct KemenySums(Movable):
         self.low_bits = num_candidates // 2
         self.low_states = 1 << self.low_bits
         self.high_states = 1 << (num_candidates - self.low_bits)
-        self.low = List[KemenyScore]()
+        self.low = List[SIMD[Self.score_dtype, 1]]()
         self.low.resize(num_candidates * self.low_states, 0)
-        self.high = List[KemenyScore]()
+        self.high = List[SIMD[Self.score_dtype, 1]]()
         self.high.resize(num_candidates * self.high_states, 0)
 
         for candidate in range(num_candidates):
@@ -89,7 +91,7 @@ struct KemenySums(Movable):
                 self.low_bits,
             )
 
-    def against(self, candidate: Int, subset: Int) -> KemenyScore:
+    def against(self, candidate: Int, subset: Int) -> SIMD[Self.score_dtype, 1]:
         """Votes that preferred this candidate to every member of the subset."""
         return (
             self.low[candidate * self.low_states + (subset & (self.low_states - 1))]
@@ -103,11 +105,11 @@ struct KemenySolution(Movable):
 
     var ranking: List[Int]
     """The candidates in consensus order, best placed first."""
-    var score: Int
+    var score: UInt64
     """Ballot pairs the ranking disagrees with, which no other ordering undercuts."""
 
 
-def binomial_table(num_candidates: Int) -> List[UInt32]:
+def kemeny_binomials(num_candidates: Int) -> List[UInt32]:
     """Pascal's triangle, entry `upper * (num_candidates + 1) + lower` counting `C(upper, lower)`."""
     var stride = num_candidates + 1
     var table = List[UInt32]()
@@ -123,7 +125,7 @@ def binomial_table(num_candidates: Int) -> List[UInt32]:
 
 
 @always_inline
-def subset_at_colex_rank(binomials: List[UInt32], num_candidates: Int, seated: Int, rank: Int) -> Int:
+def kemeny_unrank_colex(binomials: List[UInt32], num_candidates: Int, seated: Int, rank: Int) -> Int:
     """The subset mask a colex rank names among those seating `seated` of the candidates."""
     var stride = num_candidates + 1
     var subset = 0
@@ -141,7 +143,32 @@ def subset_at_colex_rank(binomials: List[UInt32], num_candidates: Int, seated: I
     return subset
 
 
-def kemeny_ranking(preferences: PreferenceMatrix) raises -> KemenySolution:
+def kemeny_score_bound(preferences: PreferenceMatrix) raises -> UInt64:
+    if preferences.num_candidates < 1 or preferences.num_candidates > KEMENY_MAX_CANDIDATES:
+        raise Error("Kemeny is exact to " + String(KEMENY_MAX_CANDIDATES) + " candidates")
+    var bound = UInt64(0)
+    for row in range(preferences.num_candidates):
+        for column in range(row + 1, preferences.num_candidates):
+            bound += UInt64(max(preferences[row, column], preferences[column, row]))
+    return bound
+
+
+def resolve_score_type(preferences: PreferenceMatrix, requested_type: ScoreType = ScoreType.auto) raises -> ScoreType:
+    """Resolves automatic arithmetic, reserving its maximum value for unreachable states."""
+    if requested_type != ScoreType.auto:
+        return requested_type
+    return ScoreType.uint32 if kemeny_score_bound(preferences) < UInt64(UInt32.MAX) else ScoreType.uint64
+
+
+def require_kemeny_score_range[score_dtype: DType](preferences: PreferenceMatrix) raises:
+    comptime assert score_dtype == DType.uint16 or score_dtype == DType.uint32 or score_dtype == DType.uint64
+    if kemeny_score_bound(preferences) >= UInt64(SIMD[score_dtype, 1].MAX):
+        raise Error("Kemeny score bound exceeds the selected arithmetic type")
+
+
+def compute_kemeny_ranking_cpu[
+    score_dtype: DType = DType.uint64
+](preferences: PreferenceMatrix) raises -> KemenySolution:
     """
     Determines the exact Kemeny-Young consensus ranking and its disagreement score.
 
@@ -157,19 +184,18 @@ def kemeny_ranking(preferences: PreferenceMatrix) raises -> KemenySolution:
     """
     var num_candidates = preferences.num_candidates
     if num_candidates < 1 or num_candidates > KEMENY_MAX_CANDIDATES:
-        raise Error(
-            "Kemeny is exact to " + String(KEMENY_MAX_CANDIDATES) + " candidates, reaching 64 GiB at that width"
-        )
+        raise Error("Kemeny is exact to " + String(KEMENY_MAX_CANDIDATES) + " candidates")
 
-    var sums = KemenySums(preferences)
-    var binomials = binomial_table(num_candidates)
+    require_kemeny_score_range[score_dtype](preferences)
+    var sums = KemenySums[score_dtype](preferences)
+    var binomials = kemeny_binomials(num_candidates)
     var binomials_stride = num_candidates + 1
     var states = 1 << num_candidates
 
     # Entry `subset` is the least disagreement achievable seating those candidates in the
     # leading places, counting only the pairs inside it. Clearing a bit drops the population
     # count by exactly one, so one layer of subsets depends only on the layer below it.
-    var costs = List[KemenyScore]()
+    var costs = List[SIMD[score_dtype, 1]]()
     costs.resize(states, 0)
     var costs_data = costs.unsafe_ptr()
 
@@ -182,9 +208,9 @@ def kemeny_ranking(preferences: PreferenceMatrix) raises -> KemenySolution:
         def fill_layer_chunk(chunk: Int) {imm}:
             var first_rank = chunk * KEMENY_LAYER_CHUNK
             var last_rank = min(first_rank + KEMENY_LAYER_CHUNK, layer_states)
-            var subset = subset_at_colex_rank(binomials, num_candidates, layer_seated, first_rank)
+            var subset = kemeny_unrank_colex(binomials, num_candidates, layer_seated, first_rank)
             for _ in range(first_rank, last_rank):
-                var best = KemenyScore.MAX
+                var best = SIMD[score_dtype, 1].MAX
                 for candidate in range(num_candidates):
                     var bit = 1 << candidate
                     if not subset & bit:
@@ -224,16 +250,22 @@ def kemeny_ranking(preferences: PreferenceMatrix) raises -> KemenySolution:
         subset ^= 1 << seated_last
 
     ranking.reverse()
-    return KemenySolution(ranking^, Int(costs[states - 1]))
+    return KemenySolution(ranking^, UInt64(costs[states - 1]))
 
 
 # endregion Kemeny
 
 
 @always_inline
-def gpu_votes_against(
-    sums: Pointer[UInt64, MutUntrackedOrigin], low_bits: Int, num_candidates: Int, candidate: Int, subset: Int
-) -> UInt64:
+def kemeny_votes_against_gpu[
+    score_dtype: DType
+](
+    sums: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    low_bits: Int,
+    num_candidates: Int,
+    candidate: Int,
+    subset: Int,
+) -> SIMD[score_dtype, 1]:
     var low_states = 1 << low_bits
     var high_states = 1 << (num_candidates - low_bits)
     return (
@@ -242,10 +274,12 @@ def gpu_votes_against(
     )
 
 
-def gpu_kemeny_layer(
-    sums: Pointer[UInt64, MutUntrackedOrigin],
+def kemeny_layer_gpu[
+    score_dtype: DType
+](
+    sums: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     binomials: Pointer[UInt32, MutUntrackedOrigin],
-    costs: Pointer[UInt64, MutUntrackedOrigin],
+    costs: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     num_candidates_arg: Int32,
     seated_arg: Int32,
     layer_states_arg: Int32,
@@ -266,28 +300,32 @@ def gpu_kemeny_layer(
             rank -= below
             subset |= 1 << candidate
             remaining -= 1
-    var best = UInt64.MAX
+    var best = SIMD[score_dtype, 1].MAX
     var members = subset
     while members:
         var bit = members & -members
         var index = Int(count_trailing_zeros(bit))
         var rest = subset ^ bit
         best = min(
-            best, costs[unsafe_offset=rest] + gpu_votes_against(sums, num_candidates // 2, num_candidates, index, rest)
+            best,
+            costs[unsafe_offset=rest]
+            + kemeny_votes_against_gpu(sums, num_candidates // 2, num_candidates, index, rest),
         )
         members ^= bit
     costs[unsafe_offset=subset] = best
 
 
-def gpu_kemeny_trace(
-    sums: Pointer[UInt64, MutUntrackedOrigin],
-    costs: Pointer[UInt64, MutUntrackedOrigin],
+def kemeny_trace_gpu[
+    score_dtype: DType
+](
+    sums: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    costs: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
     result: Pointer[UInt64, MutUntrackedOrigin],
     num_candidates_arg: Int32,
 ):
     var num_candidates = Int(num_candidates_arg)
     var subset = (1 << num_candidates) - 1
-    result[unsafe_offset=num_candidates] = costs[unsafe_offset=subset]
+    result[unsafe_offset=num_candidates] = UInt64(costs[unsafe_offset=subset])
     for place in range(num_candidates - 1, -1, -1):
         result[unsafe_offset=place] = UInt64.MAX
         for candidate in range(num_candidates):
@@ -295,7 +333,7 @@ def gpu_kemeny_trace(
             if not subset & bit:
                 continue
             var rest = subset ^ bit
-            if costs[unsafe_offset=subset] == costs[unsafe_offset=rest] + gpu_votes_against(
+            if costs[unsafe_offset=subset] == costs[unsafe_offset=rest] + kemeny_votes_against_gpu(
                 sums, num_candidates // 2, num_candidates, candidate, rest
             ):
                 result[unsafe_offset=place] = UInt64(candidate)
@@ -303,19 +341,22 @@ def gpu_kemeny_trace(
                 break
 
 
-def kemeny_ranking_gpu(preferences: PreferenceMatrix) raises -> KemenySolution:
+def compute_kemeny_ranking_gpu[
+    score_dtype: DType = DType.uint64
+](preferences: PreferenceMatrix) raises -> KemenySolution:
     """Solves exact consensus on the GPU, one launch per subset population count."""
     var n = preferences.num_candidates
     if n < 1 or n > KEMENY_MAX_CANDIDATES:
         raise Error("Kemeny supports 1 to " + String(KEMENY_MAX_CANDIDATES) + " candidates")
-    var sums = KemenySums(preferences)
-    var binomials = binomial_table(n)
+    require_kemeny_score_range[score_dtype](preferences)
+    var sums = KemenySums[score_dtype](preferences)
+    var binomials = kemeny_binomials(n)
     var ctx = DeviceContext()
-    var host_sums = ctx.enqueue_create_host_buffer[DType.uint64](len(sums.low) + len(sums.high))
-    var device_sums = ctx.enqueue_create_buffer[DType.uint64](len(sums.low) + len(sums.high))
+    var host_sums = ctx.enqueue_create_host_buffer[score_dtype](len(sums.low) + len(sums.high))
+    var device_sums = ctx.enqueue_create_buffer[score_dtype](len(sums.low) + len(sums.high))
     var host_binomials = ctx.enqueue_create_host_buffer[DType.uint32](len(binomials))
     var device_binomials = ctx.enqueue_create_buffer[DType.uint32](len(binomials))
-    var costs = ctx.enqueue_create_buffer[DType.uint64](1 << n)
+    var costs = ctx.enqueue_create_buffer[score_dtype](1 << n)
     var host_result = ctx.enqueue_create_host_buffer[DType.uint64](n + 1)
     var device_result = ctx.enqueue_create_buffer[DType.uint64](n + 1)
     ctx.synchronize()
@@ -330,7 +371,7 @@ def kemeny_ranking_gpu(preferences: PreferenceMatrix) raises -> KemenySolution:
     costs.enqueue_fill(0)
     for seated in range(1, n + 1):
         var layer_states = Int(binomials[n * (n + 1) + seated])
-        ctx.enqueue_function[gpu_kemeny_layer](
+        ctx.enqueue_function[kemeny_layer_gpu[score_dtype]](
             device_sums.unsafe_ptr(),
             device_binomials.unsafe_ptr(),
             costs.unsafe_ptr(),
@@ -340,7 +381,7 @@ def kemeny_ranking_gpu(preferences: PreferenceMatrix) raises -> KemenySolution:
             grid_dim=((layer_states + 255) // 256, 1, 1),
             block_dim=(256, 1, 1),
         )
-    ctx.enqueue_function[gpu_kemeny_trace](
+    ctx.enqueue_function[kemeny_trace_gpu[score_dtype]](
         device_sums.unsafe_ptr(),
         costs.unsafe_ptr(),
         device_result.unsafe_ptr(),
@@ -356,4 +397,24 @@ def kemeny_ranking_gpu(preferences: PreferenceMatrix) raises -> KemenySolution:
         if candidate >= UInt64(n):
             raise Error("No candidate in the subset explains its cost, so the table is inconsistent")
         ranking.append(Int(candidate))
-    return KemenySolution(ranking^, Int(host_result.unsafe_ptr()[unsafe_offset=n]))
+    return KemenySolution(ranking^, host_result.unsafe_ptr()[unsafe_offset=n])
+
+
+def compute_kemeny_ranking(
+    preferences: PreferenceMatrix, *, backend: Backend = Backend.cpu, score_type: ScoreType = ScoreType.auto
+) raises -> KemenySolution:
+    """Dispatches exact ranking to the selected device and a safe compiled score width."""
+    var resolved = resolve_score_type(preferences, score_type)
+    if resolved == ScoreType.uint16:
+        return compute_kemeny_ranking_gpu[DType.uint16](
+            preferences
+        ) if backend == Backend.gpu else compute_kemeny_ranking_cpu[DType.uint16](preferences)
+    if resolved == ScoreType.uint32:
+        return compute_kemeny_ranking_gpu[DType.uint32](
+            preferences
+        ) if backend == Backend.gpu else compute_kemeny_ranking_cpu[DType.uint32](preferences)
+    if resolved == ScoreType.uint64:
+        return compute_kemeny_ranking_gpu[DType.uint64](
+            preferences
+        ) if backend == Backend.gpu else compute_kemeny_ranking_cpu[DType.uint64](preferences)
+    raise Error("Invalid score type")

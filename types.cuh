@@ -117,6 +117,9 @@ constexpr std::uint32_t tile_size_k = 32;
 using votes_count_t = std::uint32_t;
 using candidate_index_t = std::uint32_t;
 
+enum class backend_t : std::uint8_t { cpu_k, gpu_k };
+enum class score_type_t : std::uint8_t { auto_k, uint16_k, uint32_k, uint64_k };
+
 #pragma region Shaped Views
 
 /** A two-dimensional view whose row stride travels with its extents rather than beside them. */
@@ -140,10 +143,11 @@ template <typename element_type_, typename index_type_ = candidate_index_t>
 inline strided_matrix<element_type_, index_type_> strided_view( //
     element_type_* data, std::type_identity_t<index_type_> rows, std::type_identity_t<index_type_> columns,
     std::type_identity_t<index_type_> stride) noexcept {
+    using index_t = index_type_;
 
-    using extents_t = shaped::dextents<index_type_, 2>;
+    using extents_t = shaped::dextents<index_t, 2>;
     using mapping_t = shaped::layout_stride::mapping<extents_t>;
-    return {data, mapping_t {extents_t {rows, columns}, shaped::array<index_type_, 2> {stride, index_type_ {1}}}};
+    return {data, mapping_t {extents_t {rows, columns}, shaped::array<index_t, 2> {stride, index_t {1}}}};
 }
 
 /** Views @p data as @p edge by @p edge cells whose rows sit @p stride apart. */
@@ -167,19 +171,20 @@ constexpr std::uint32_t warp_size_k = 32;
 /** Draws from CUDA's unified memory, so one allocation is addressable from both the host and the device. */
 template <typename value_type_>
 struct managed_allocator {
-    using value_type = value_type_;
+    using value_t = value_type_;
+    using value_type = value_t;
 
     managed_allocator() = default;
     template <typename other_type_>
     constexpr managed_allocator(managed_allocator<other_type_> const&) noexcept {}
 
-    value_type_* allocate(std::size_t count) {
-        value_type_* pointer = nullptr;
-        if (cudaMallocManaged(&pointer, count * sizeof(value_type_)) != cudaSuccess) throw std::bad_alloc();
+    value_t* allocate(std::size_t count) {
+        value_t* pointer = nullptr;
+        if (cudaMallocManaged(&pointer, count * sizeof(value_t)) != cudaSuccess) throw std::bad_alloc();
         return pointer;
     }
 
-    void deallocate(value_type_* pointer, std::size_t) noexcept { cudaFree(pointer); }
+    void deallocate(value_t* pointer, std::size_t) noexcept { cudaFree(pointer); }
 
     /** Leaves elements uninitialized, since a host-side zero-fill would fault a device-bound table onto the host. */
     template <typename other_type_>

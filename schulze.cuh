@@ -46,16 +46,6 @@ struct tile_origin_t {
 /** Whether a tile copy bounds-checks its edges; `checked_k` also disables the NEON path. */
 enum class tile_march_t : bool { fast_k = true, checked_k = false };
 
-/** Which family computes the strongest paths. */
-enum class backend_t : std::uint8_t {
-    /** Tiled CPU kernels across an OpenMP team. */
-    cpu_openmp_k,
-    /** Tiled GPU kernels staging tiles through per-thread loads, on CUDA or HIP. */
-    gpu_serial_k,
-    /** Tiled GPU kernels staging tiles through the bulk-tensor engine, NVIDIA sm_90 and newer. */
-    gpu_hopper_k,
-};
-
 /** The view of @p graph running from tile (@p tile_row, @p tile_column) to its far corner. */
 template <std::uint32_t tile_size_, typename element_type_>
 inline strided_matrix<element_type_> tile_view(strided_matrix<element_type_> graph, candidate_index_t tile_row,
@@ -94,14 +84,16 @@ __forceinline__ __device__ void process_tile_cuda_(                             
     votes_count_tile<tile_size_, element_type_> const& to_pivot,                         //
     votes_count_tile<tile_size_, element_type_> const& from_pivot, tile_origin_t origin, //
     candidate_index_t row, candidate_index_t column) {
+    using element_t = element_type_;
 
-    element_type_& paths_cell = paths[row][column];
+    element_t& paths_cell = paths[row][column];
     candidate_index_t const paths_row = origin.tile_row * tile_size_ + row;
     candidate_index_t const paths_column = origin.tile_column * tile_size_ + column;
 
 #pragma unroll tile_size_
     for (candidate_index_t pivot = 0; pivot < tile_size_; pivot++) {
-        element_type_ smallest = umin(to_pivot[row][pivot], from_pivot[pivot][column]);
+        element_t smallest = to_pivot[row][pivot] < from_pivot[pivot][column] ? to_pivot[row][pivot]
+                                                                              : from_pivot[pivot][column];
         if constexpr (phase_ != tile_phase_t::distinct_independent_k) {
             candidate_index_t const pivot_index = origin.pivot_tile * tile_size_ + pivot;
             std::uint32_t is_not_diagonal_paths = paths_row != paths_column;
@@ -111,9 +103,11 @@ __forceinline__ __device__ void process_tile_cuda_(                             
             std::uint32_t will_replace = is_not_diagonal_paths & is_not_diagonal_to_pivot & is_not_diagonal_from_pivot &
                                          is_bigger;
             // On Kepler an newer we can use `__funnelshift_lc` to avoid branches
-            paths_cell = static_cast<element_type_>(__funnelshift_lc(paths_cell, smallest, will_replace - 1));
+            if constexpr (sizeof(element_t) <= sizeof(std::uint32_t))
+                paths_cell = static_cast<element_t>(__funnelshift_lc(paths_cell, smallest, will_replace - 1));
+            else paths_cell = will_replace ? smallest : paths_cell;
         }
-        else paths_cell = umax(paths_cell, smallest);
+        else paths_cell = paths_cell > smallest ? paths_cell : smallest;
         if constexpr (phase_ == tile_phase_t::aliased_k) __syncthreads();
     }
 }
@@ -137,14 +131,16 @@ __forceinline__ __device__ void process_tile_cuda_(                             
     votes_count_tile<tile_size_, element_type_> const& to_pivot,                         //
     votes_count_tile<tile_size_, element_type_> const& from_pivot, tile_origin_t origin, //
     candidate_index_t row, candidate_index_t column) {
+    using element_t = element_type_;
 
-    element_type_& paths_cell = paths[row][column];
+    element_t& paths_cell = paths[row][column];
     candidate_index_t const paths_row = origin.tile_row * tile_size_ + row;
     candidate_index_t const paths_column = origin.tile_column * tile_size_ + column;
 
 #pragma unroll tile_size_
     for (candidate_index_t pivot = 0; pivot < tile_size_; pivot++) {
-        element_type_ smallest = min(to_pivot[row][pivot], from_pivot[pivot][column]);
+        element_t smallest = to_pivot[row][pivot] < from_pivot[pivot][column] ? to_pivot[row][pivot]
+                                                                              : from_pivot[pivot][column];
         if constexpr (phase_ != tile_phase_t::distinct_independent_k) {
             candidate_index_t const pivot_index = origin.pivot_tile * tile_size_ + pivot;
             std::uint32_t is_not_diagonal_paths = paths_row != paths_column;
@@ -155,7 +151,7 @@ __forceinline__ __device__ void process_tile_cuda_(                             
                                          is_bigger;
             if (will_replace) paths_cell = smallest;
         }
-        else paths_cell = max(paths_cell, smallest);
+        else paths_cell = paths_cell > smallest ? paths_cell : smallest;
         if constexpr (phase_ == tile_phase_t::aliased_k) __syncthreads();
     }
 }
@@ -195,15 +191,16 @@ __global__ void schulze_diagonal_cuda_(candidate_index_t pivot_tile, strided_mat
  */
 template <std::uint32_t tile_size_, typename element_type_>
 __global__ void schulze_partial_cuda_(candidate_index_t pivot_tile, strided_matrix<element_type_> graph) {
+    using element_t = element_type_;
     candidate_index_t const tile_index = blockIdx.x;
     candidate_index_t const row = threadIdx.y;
     candidate_index_t const column = threadIdx.x;
 
     if (tile_index == pivot_tile) return;
 
-    alignas(16) __shared__ votes_count_tile<tile_size_, element_type_> to_pivot;
-    alignas(16) __shared__ votes_count_tile<tile_size_, element_type_> from_pivot;
-    alignas(16) __shared__ votes_count_tile<tile_size_, element_type_> paths;
+    alignas(16) __shared__ votes_count_tile<tile_size_, element_t> to_pivot;
+    alignas(16) __shared__ votes_count_tile<tile_size_, element_t> from_pivot;
+    alignas(16) __shared__ votes_count_tile<tile_size_, element_t> paths;
 
     // Partially dependent phase (first of two)
     // Walking down within a group of adjacent columns
@@ -238,6 +235,7 @@ __global__ void schulze_partial_cuda_(candidate_index_t pivot_tile, strided_matr
  */
 template <std::uint32_t tile_size_, typename element_type_>
 __global__ void schulze_independent_cuda_(candidate_index_t pivot_tile, strided_matrix<element_type_> graph) {
+    using element_t = element_type_;
     candidate_index_t const tile_column = blockIdx.x;
     candidate_index_t const tile_row = blockIdx.y;
     candidate_index_t const row = threadIdx.y;
@@ -245,9 +243,9 @@ __global__ void schulze_independent_cuda_(candidate_index_t pivot_tile, strided_
 
     if (tile_row == pivot_tile && tile_column == pivot_tile) return;
 
-    alignas(16) __shared__ votes_count_tile<tile_size_, element_type_> to_pivot;
-    alignas(16) __shared__ votes_count_tile<tile_size_, element_type_> from_pivot;
-    alignas(16) __shared__ votes_count_tile<tile_size_, element_type_> paths;
+    alignas(16) __shared__ votes_count_tile<tile_size_, element_t> to_pivot;
+    alignas(16) __shared__ votes_count_tile<tile_size_, element_t> from_pivot;
+    alignas(16) __shared__ votes_count_tile<tile_size_, element_t> paths;
 
     paths[row][column] = graph(tile_row * tile_size_ + row, tile_column * tile_size_ + column);
     to_pivot[row][column] = graph(tile_row * tile_size_ + row, pivot_tile * tile_size_ + column);
@@ -279,13 +277,15 @@ enum class graph_width_t : std::uint8_t {
 template <typename wide_type_, typename narrow_type_>
 __global__ void schulze_narrow_cuda_(std::size_t cells, wide_type_ const* wide, narrow_type_* narrow,
                                      wide_type_* overflowed) {
+    using wide_t = wide_type_;
+    using narrow_t = narrow_type_;
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     std::size_t const first = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    constexpr wide_type_ widest_k = static_cast<narrow_type_>(~static_cast<narrow_type_>(0));
+    constexpr wide_t widest_k = static_cast<narrow_t>(~static_cast<narrow_t>(0));
     for (std::size_t cell = first; cell < cells; cell += stride) {
-        wide_type_ const value = wide[cell];
+        wide_t const value = wide[cell];
         if (value > widest_k) *overflowed = 1;
-        narrow[cell] = static_cast<narrow_type_>(value);
+        narrow[cell] = static_cast<narrow_t>(value);
     }
 }
 
@@ -507,7 +507,7 @@ using tma_descriptor_t = std::optional<CUtensorMap>;
 template <std::uint32_t tile_size_>
 tma_descriptor_t require_tma_(matrix_t graph, cudaDeviceProp const& device_properties) {
     if (device_properties.major < 9)
-        throw std::runtime_error("The `gpu_hopper` backend needs compute capability 9.0, found " +
+        throw std::runtime_error("The Hopper kernel needs compute capability 9.0, found " +
                                  std::to_string(device_properties.major) + "." +
                                  std::to_string(device_properties.minor));
 
@@ -550,7 +550,7 @@ tma_descriptor_t require_tma_(matrix_t graph, cudaDeviceProp const& device_prope
         // Any element that is outside of bounds will be set to zero by the TMA transfer.
         CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     if (encode_status != CUDA_SUCCESS)
-        throw std::runtime_error("The `gpu_hopper` backend could not encode a tensor map for this layout");
+        throw std::runtime_error("The Hopper kernel could not encode a tensor map for this layout");
     return descriptor_map;
 }
 
@@ -563,13 +563,11 @@ tma_descriptor_t require_tma_(matrix_t graph, cudaDeviceProp const& device_prope
  *  @param[in] pivot_tile The index of the current pivot tile.
  *  @param[inout] graph The padded matrix of strongest paths.
  *  @param[in] tma The tensor-map descriptor produced by @c require_tma_ .
- *  @param[in] backend Which family the caller asked for.
  */
 template <std::uint32_t tile_size_>
 void launch_independent_(dim3 grid, dim3 block, candidate_index_t pivot_tile, matrix_t graph,
-                         tma_descriptor_t const& tma, backend_t backend) {
-    if (backend == backend_t::gpu_hopper_k)
-        schulze_independent_hopper_cuda_<tile_size_><<<grid, block>>>(pivot_tile, *tma);
+                         tma_descriptor_t const& tma) {
+    if (tma) schulze_independent_hopper_cuda_<tile_size_><<<grid, block>>>(pivot_tile, *tma);
     else schulze_independent_cuda_<tile_size_><<<grid, block>>>(pivot_tile, graph);
 }
 
@@ -579,15 +577,14 @@ void launch_independent_(dim3 grid, dim3 block, candidate_index_t pivot_tile, ma
 using tma_descriptor_t = std::nullopt_t;
 
 template <std::uint32_t tile_size_>
-void launch_independent_(dim3 grid, dim3 block, candidate_index_t pivot_tile, matrix_t graph, tma_descriptor_t const&,
-                         backend_t) {
+void launch_independent_(dim3 grid, dim3 block, candidate_index_t pivot_tile, matrix_t graph, tma_descriptor_t const&) {
     schulze_independent_cuda_<tile_size_><<<grid, block>>>(pivot_tile, graph);
 }
 
 /** HIP has no bulk-tensor engine, so the descriptor can never be built. */
 template <std::uint32_t tile_size_>
 tma_descriptor_t require_tma_(matrix_t, cudaDeviceProp const&) {
-    throw std::runtime_error("The `gpu_hopper` backend is unavailable in a HIP build");
+    throw std::runtime_error("The Hopper kernel is unavailable in a HIP build");
 }
 
 #endif
@@ -595,15 +592,17 @@ tma_descriptor_t require_tma_(matrix_t, cudaDeviceProp const&) {
 #if !defined(SCALING_ELECTIONS_WITH_HIP)
 
 #if defined(__CUDA_ARCH_LIST__)
-/** Whether this build carries native sm_90 code, where packed min-max is a single instruction. */
-constexpr bool carries_native_packed_min_max() {
+/** Whether this device can load native code containing the sm_90 instructions. */
+constexpr bool carries_native_sm90_code_(cudaDeviceProp const& device_properties) {
     for (int compiled : {__CUDA_ARCH_LIST__})
-        if (compiled >= 900) return true;
+        if (compiled >= 900 && compiled / 100 == device_properties.major &&
+            compiled % 100 <= device_properties.minor * 10)
+            return true;
     return false;
 }
 #else
 /** Without an architecture list the build cannot promise a native packed min-max. */
-constexpr bool carries_native_packed_min_max() { return false; }
+constexpr bool carries_native_sm90_code_(cudaDeviceProp const&) { return false; }
 #endif
 
 /**
@@ -613,11 +612,10 @@ constexpr bool carries_native_packed_min_max() { return false; }
  *  compiled architectures and the running device have to offer the real instruction.
  */
 template <std::uint32_t tile_size_>
-graph_width_t choose_width_(backend_t backend, cudaDeviceProp const& device_properties) {
+graph_width_t choose_width_(cudaDeviceProp const& device_properties) {
     if constexpr (tile_size_ % 4 != 0) return graph_width_t::wide_32_k;
     else {
-        if (backend != backend_t::gpu_serial_k) return graph_width_t::wide_32_k;
-        if (!carries_native_packed_min_max()) return graph_width_t::wide_32_k;
+        if (!carries_native_sm90_code_(device_properties)) return graph_width_t::wide_32_k;
         if (device_properties.major < 9) return graph_width_t::wide_32_k;
         return graph_width_t::narrow_16_k;
     }
@@ -647,7 +645,7 @@ void sweep_narrow_(strided_matrix<std::uint16_t> graph) {
 
 /** HIP has no packed 16-bit min-max, so the sweep never narrows. */
 template <std::uint32_t tile_size_>
-graph_width_t choose_width_(backend_t, cudaDeviceProp const&) {
+graph_width_t choose_width_(cudaDeviceProp const&) {
     return graph_width_t::wide_32_k;
 }
 
@@ -659,16 +657,18 @@ void sweep_narrow_(strided_matrix<std::uint16_t>) {
 
 #endif
 
-/** Runs every pivot step on the 32-bit graph, through whichever independent kernel the backend names. */
-template <std::uint32_t tile_size_>
-void sweep_wide_(matrix_t graph, tma_descriptor_t const& tma, backend_t backend) {
+/** Runs every pivot step on the 32-bit graph, using TMA when a tensor map is available. */
+template <std::uint32_t tile_size_, typename score_type_>
+void sweep_wide_(strided_matrix<score_type_> graph, tma_descriptor_t const& tma) {
     candidate_index_t const tiles_count = graph.extent(0) / tile_size_;
     dim3 const tile_shape(tile_size_, tile_size_, 1);
     dim3 const independent_grid(tiles_count, tiles_count, 1);
     for (candidate_index_t pivot_tile = 0; pivot_tile < tiles_count; pivot_tile++) {
         schulze_diagonal_cuda_<tile_size_><<<1, tile_shape>>>(pivot_tile, graph);
         schulze_partial_cuda_<tile_size_><<<tiles_count, tile_shape>>>(pivot_tile, graph);
-        launch_independent_<tile_size_>(independent_grid, tile_shape, pivot_tile, graph, tma, backend);
+        if constexpr (std::is_same_v<score_type_, std::uint32_t>)
+            launch_independent_<tile_size_>(independent_grid, tile_shape, pivot_tile, graph, tma);
+        else schulze_independent_cuda_<tile_size_><<<independent_grid, tile_shape>>>(pivot_tile, graph);
 
         cudaError_t const error = cudaGetLastError();
         if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
@@ -707,15 +707,16 @@ inline void widen_graph_(std::size_t cells, std::uint16_t const* narrow, votes_c
  *  @tparam tile_size_ The size of the tile to be processed.
  *  @param[in] preferences The preferences matrix.
  *  @param[out] graph The padded output matrix of strongest paths, a whole number of tiles wide.
- *  @param[in] backend Which GPU family to launch.
  *  @param[in] seed Which graph the sweep closes over.
  *
- *  On sm_90 the per-thread backend narrows the graph to 16 bits and runs the independent phase two
- *  candidates per word, falling back to the 32-bit sweep when any vote count reaches 65536.
+ *  On sm_90, safe 16-bit graphs use packed min-max; wider graphs use TMA.
+ *  Other devices use the ordinary tiled sweep.
  */
-template <std::uint32_t tile_size_> //
-void compute_strongest_paths_cuda(  //
-    const_matrix_t preferences, matrix_t graph, backend_t backend, seed_graph_t seed = seed_graph_t::winning_votes_k) {
+template <std::uint32_t tile_size_, typename score_type_ = votes_count_t>
+void compute_strongest_paths_gpu(const_matrix_t preferences, strided_matrix<score_type_> graph,
+                                 seed_graph_t seed = seed_graph_t::winning_votes_k,
+                                 score_type_t score_type = score_type_t::auto_k) {
+    using score_t = score_type_;
 
     candidate_index_t const num_candidates = preferences.extent(0);
     candidate_index_t const graph_stride = graph.stride(0);
@@ -730,21 +731,34 @@ void compute_strongest_paths_cuda(  //
     error = cudaGetDeviceProperties(&device_properties, current_device);
     if (error != cudaSuccess) throw std::runtime_error("Failed to get device properties");
 
-    tma_descriptor_t const tma = backend == backend_t::gpu_hopper_k ? require_tma_<tile_size_>(graph, device_properties)
-                                                                    : tma_descriptor_t {std::nullopt};
-
-    std::size_t const cells = static_cast<std::size_t>(graph_stride) * graph_stride;
-    if (choose_width_<tile_size_>(backend, device_properties) == graph_width_t::narrow_16_k) {
-        managed_vector<std::uint16_t> narrow(cells);
-        managed_vector<votes_count_t> overflowed(1);
-        if (narrow_graph_(cells, graph.data_handle(), narrow.data(), overflowed.data()) == graph_width_t::narrow_16_k) {
-            sweep_narrow_<tile_size_>(square_view(narrow.data(), graph_stride, graph_stride));
-            widen_graph_(cells, narrow.data(), graph.data_handle());
+    tma_descriptor_t tma {std::nullopt};
+    if constexpr (std::is_same_v<score_t, std::uint16_t>) {
+        if (choose_width_<tile_size_>(device_properties) == graph_width_t::narrow_16_k) {
+            sweep_narrow_<tile_size_>(graph);
             return;
         }
     }
+    if constexpr (std::is_same_v<score_t, std::uint32_t>) {
+        std::size_t const cells = static_cast<std::size_t>(graph_stride) * graph_stride;
+        if (score_type == score_type_t::auto_k &&
+            choose_width_<tile_size_>(device_properties) == graph_width_t::narrow_16_k) {
+            managed_vector<std::uint16_t> narrow(cells);
+            managed_vector<votes_count_t> overflowed(1);
+            if (narrow_graph_(cells, graph.data_handle(), narrow.data(), overflowed.data()) ==
+                graph_width_t::narrow_16_k) {
+                sweep_narrow_<tile_size_>(square_view(narrow.data(), graph_stride, graph_stride));
+                widen_graph_(cells, narrow.data(), graph.data_handle());
+                return;
+            }
+        }
 
-    sweep_wide_<tile_size_>(graph, tma, backend);
+#if !defined(SCALING_ELECTIONS_WITH_HIP)
+        if (carries_native_sm90_code_(device_properties) && device_properties.major >= 9) {
+            tma = require_tma_<tile_size_>(graph, device_properties);
+        }
+#endif
+    }
+    sweep_wide_<tile_size_>(graph, tma);
 }
 
 #endif // defined(SCALING_ELECTIONS_WITH_CUDA)
@@ -763,19 +777,20 @@ void compute_strongest_paths_cuda(  //
  *  Tile @p paths is the output, @p to_pivot and @p from_pivot the inputs, and @p origin places all
  *  three in the global matrix. Every cell is walked serially, so an aliased phase needs no barrier.
  */
-template <std::uint32_t tile_size_, tile_phase_t phase_>
-inline void process_tile_openmp_(                   //
-    votes_count_tile<tile_size_>& paths,            //
-    votes_count_tile<tile_size_> const& to_pivot,   //
-    votes_count_tile<tile_size_> const& from_pivot, //
+template <std::uint32_t tile_size_, tile_phase_t phase_, typename score_type_>
+inline void process_tile_openmp_(                                //
+    votes_count_tile<tile_size_, score_type_>& paths,            //
+    votes_count_tile<tile_size_, score_type_> const& to_pivot,   //
+    votes_count_tile<tile_size_, score_type_> const& from_pivot, //
     tile_origin_t origin) {
+    using score_t = score_type_;
 
     candidate_index_t const paths_row_origin = origin.tile_row * tile_size_;
     candidate_index_t const paths_column_origin = origin.tile_column * tile_size_;
     candidate_index_t const pivot_origin = origin.pivot_tile * tile_size_;
 
 #if defined(SCALING_ELECTIONS_WITH_NEON)
-    if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size_ % 4 == 0) {
+    if constexpr (std::is_same<score_t, std::uint32_t>() && tile_size_ % 4 == 0) {
         uint32x4_t column_step = {0, 1, 2, 3};
         for (candidate_index_t pivot = 0; pivot < tile_size_; pivot++) {
             uint32x4_t pivot_index_vec = vdupq_n_u32(pivot_origin + pivot);
@@ -785,7 +800,7 @@ inline void process_tile_openmp_(                   //
                 uint32x4_t is_not_diagonal_to_pivot = vmvnq_u32(vceqq_u32(paths_row_vec, pivot_index_vec));
                 SCALING_ELECTIONS_UNROLL
                 for (candidate_index_t column = 0; column < tile_size_; column += 4) {
-                    votes_count_t* paths_cells = &paths[row][column];
+                    score_t* paths_cells = &paths[row][column];
                     uint32x4_t paths_vec = vld1q_u32(paths_cells);
                     uint32x4_t from_pivot_vec = vld1q_u32(&from_pivot[pivot][column]);
                     uint32x4_t smallest = vminq_u32(to_pivot_vec, from_pivot_vec);
@@ -812,11 +827,11 @@ inline void process_tile_openmp_(                   //
     for (candidate_index_t pivot = 0; pivot < tile_size_; pivot++) {
         candidate_index_t const pivot_index = pivot_origin + pivot;
         for (candidate_index_t row = 0; row < tile_size_; row++) {
-            votes_count_t* const paths_cells = &paths[row][0];
+            score_t* const paths_cells = &paths[row][0];
 #pragma omp simd
             for (candidate_index_t column = 0; column < tile_size_; column++) {
-                votes_count_t paths_cell = paths_cells[column];
-                votes_count_t smallest = std::min(to_pivot[row][pivot], from_pivot[pivot][column]);
+                score_t paths_cell = paths_cells[column];
+                score_t smallest = std::min(to_pivot[row][pivot], from_pivot[pivot][column]);
                 if constexpr (phase_ != tile_phase_t::distinct_independent_k) {
                     std::uint32_t is_not_diagonal_paths = (paths_row_origin + row) != (paths_column_origin + column);
                     std::uint32_t is_not_diagonal_to_pivot = (paths_row_origin + row) != pivot_index;
@@ -833,12 +848,12 @@ inline void process_tile_openmp_(                   //
 }
 
 /** Stages the tile whose top-left corner @p source names into @p target , zero-filling any tail. */
-template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k>
-void memcpy2d(const_matrix_t source, votes_count_tile<tile_size_>& target) {
+template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k, typename score_type_ = votes_count_t>
+void memcpy2d(strided_matrix<score_type_> source, votes_count_tile<tile_size_, score_type_>& target) {
+    using score_t = score_type_;
 
 #if defined(SCALING_ELECTIONS_WITH_NEON)
-    if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size_ % 4 == 0 &&
-                  march_ == tile_march_t::fast_k) {
+    if constexpr (std::is_same<score_t, std::uint32_t>() && tile_size_ % 4 == 0 && march_ == tile_march_t::fast_k) {
         for (candidate_index_t row = 0; row < tile_size_; row++) {
             SCALING_ELECTIONS_UNROLL
             for (candidate_index_t column = 0; column < tile_size_; column += 4) {
@@ -859,18 +874,18 @@ void memcpy2d(const_matrix_t source, votes_count_tile<tile_size_>& target) {
     // One row lookup per row, since a strided view multiplies on every cell it is asked for.
     else
         for (candidate_index_t row = 0; row < tile_size_; row++) {
-            votes_count_t const* const source_row = &source(row, 0);
+            score_t const* const source_row = &source(row, 0);
             for (candidate_index_t column = 0; column < tile_size_; column++) target[row][column] = source_row[column];
         }
 }
 
 /** Writes @p source back over the tile whose top-left corner @p target names, dropping any tail. */
-template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k>
-void memcpy2d(votes_count_tile<tile_size_> const& source, matrix_t target) {
+template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k, typename score_type_ = votes_count_t>
+void memcpy2d(votes_count_tile<tile_size_, score_type_> const& source, strided_matrix<score_type_> target) {
+    using score_t = score_type_;
 
 #if defined(SCALING_ELECTIONS_WITH_NEON)
-    if constexpr (std::is_same<votes_count_t, std::uint32_t>() && tile_size_ % 4 == 0 &&
-                  march_ == tile_march_t::fast_k) {
+    if constexpr (std::is_same<score_t, std::uint32_t>() && tile_size_ % 4 == 0 && march_ == tile_march_t::fast_k) {
         for (candidate_index_t row = 0; row < tile_size_; row++) {
             SCALING_ELECTIONS_UNROLL
             for (candidate_index_t column = 0; column < tile_size_; column += 4) {
@@ -891,7 +906,7 @@ void memcpy2d(votes_count_tile<tile_size_> const& source, matrix_t target) {
     // One row lookup per row, since a strided view multiplies on every cell it is asked for.
     else
         for (candidate_index_t row = 0; row < tile_size_; row++) {
-            votes_count_t* const target_row = &target(row, 0);
+            score_t* const target_row = &target(row, 0);
             for (candidate_index_t column = 0; column < tile_size_; column++) target_row[column] = source[row][column];
         }
 }
@@ -906,10 +921,11 @@ void memcpy2d(votes_count_tile<tile_size_> const& source, matrix_t target) {
  *  @param[in] cancelled Polled between pivots, aborting the run once it reads non-zero.
  *  @param[in] seed Which graph the sweep closes over.
  */
-template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k> //
-void compute_strongest_paths_openmp(                                            //
-    const_matrix_t preferences, matrix_t graph, volatile std::sig_atomic_t const* cancelled = nullptr,
-    seed_graph_t seed = seed_graph_t::winning_votes_k) {
+template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k, typename score_type_ = votes_count_t> //
+void compute_strongest_paths_tiled_cpu(                                                                               //
+    const_matrix_t preferences, strided_matrix<score_type_> graph,
+    volatile std::sig_atomic_t const* cancelled = nullptr, seed_graph_t seed = seed_graph_t::winning_votes_k) {
+    using score_t = score_type_;
 
     seed_graph(preferences, graph, seed);
 
@@ -922,7 +938,7 @@ void compute_strongest_paths_openmp(                                            
 
         // Dependent phase
         {
-            alignas(64) votes_count_tile<tile_size_> paths;
+            alignas(64) votes_count_tile<tile_size_, score_t> paths;
             memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, pivot_tile, pivot_tile), paths);
             process_tile_openmp_<tile_size_, tile_phase_t::aliased_k>( //
                 paths, paths, paths, tile_origin_t {pivot_tile, pivot_tile, pivot_tile});
@@ -932,8 +948,8 @@ void compute_strongest_paths_openmp(                                            
 #pragma omp parallel for schedule(dynamic)
         for (candidate_index_t tile_row = 0; tile_row < tiles_count; tile_row++) {
             if (tile_row == pivot_tile) continue;
-            alignas(64) votes_count_tile<tile_size_> from_pivot;
-            alignas(64) votes_count_tile<tile_size_> paths;
+            alignas(64) votes_count_tile<tile_size_, score_t> from_pivot;
+            alignas(64) votes_count_tile<tile_size_, score_t> paths;
             memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, tile_row, pivot_tile), paths);
             memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, pivot_tile, pivot_tile), from_pivot);
             process_tile_openmp_<tile_size_, tile_phase_t::aliased_k>( //
@@ -944,8 +960,8 @@ void compute_strongest_paths_openmp(                                            
 #pragma omp parallel for schedule(dynamic)
         for (candidate_index_t tile_column = 0; tile_column < tiles_count; tile_column++) {
             if (tile_column == pivot_tile) continue;
-            alignas(64) votes_count_tile<tile_size_> to_pivot;
-            alignas(64) votes_count_tile<tile_size_> paths;
+            alignas(64) votes_count_tile<tile_size_, score_t> to_pivot;
+            alignas(64) votes_count_tile<tile_size_, score_t> paths;
             memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, pivot_tile, tile_column), paths);
             memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, pivot_tile, pivot_tile), to_pivot);
             process_tile_openmp_<tile_size_, tile_phase_t::aliased_k>( //
@@ -957,9 +973,9 @@ void compute_strongest_paths_openmp(                                            
         for (candidate_index_t tile_row = 0; tile_row < tiles_count; tile_row++) {
             for (candidate_index_t tile_column = 0; tile_column < tiles_count; tile_column++) {
                 if (tile_row == pivot_tile || tile_column == pivot_tile) continue;
-                alignas(64) votes_count_tile<tile_size_> to_pivot;
-                alignas(64) votes_count_tile<tile_size_> from_pivot;
-                alignas(64) votes_count_tile<tile_size_> paths;
+                alignas(64) votes_count_tile<tile_size_, score_t> to_pivot;
+                alignas(64) votes_count_tile<tile_size_, score_t> from_pivot;
+                alignas(64) votes_count_tile<tile_size_, score_t> paths;
                 memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, tile_row, tile_column), paths);
                 memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, tile_row, pivot_tile), to_pivot);
                 memcpy2d<tile_size_, march_>(tile_view<tile_size_>(graph, pivot_tile, tile_column), from_pivot);

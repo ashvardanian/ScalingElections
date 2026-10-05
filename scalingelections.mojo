@@ -14,9 +14,10 @@ from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
 from std.sys import has_accelerator
 
-from ballots import PreferenceMatrix, SeedGraph, tally_ballots_cpu, tally_ballots_gpu
-from kemeny import kemeny_ranking, kemeny_ranking_gpu
-from schulze import TILE_SIZE, compute_strongest_paths_gpu, compute_strongest_paths_tiled_cpu_simd, split_cycle_winners
+import ballots
+import kemeny
+import schulze
+from ballots import Backend, PreferenceMatrix, ScoreType
 
 # region Python Bindings
 
@@ -30,7 +31,7 @@ def available_backends() raises -> PythonObject:
     return names
 
 
-def use_gpu(kwargs: StringDict[PythonObject]) raises -> Bool:
+def backend_from(kwargs: StringDict[PythonObject]) raises -> Backend:
     var backend = String(kwargs["backend"]) if "backend" in kwargs else String("cpu")
     for key in kwargs:
         if String(key) != "backend":
@@ -39,7 +40,21 @@ def use_gpu(kwargs: StringDict[PythonObject]) raises -> Bool:
         raise Error("Unknown backend: " + backend + "; expected cpu or gpu")
     if backend == "gpu" and not has_accelerator():
         raise Error("No GPU is available to the Mojo runtime")
-    return backend == "gpu"
+    return Backend.gpu if backend == "gpu" else Backend.cpu
+
+
+def score_type_from(mut kwargs: StringDict[PythonObject]) raises -> ScoreType:
+    var requested_type = String(kwargs.pop("score_type")) if "score_type" in kwargs else String("auto")
+    var score_type = ScoreType.auto
+    if requested_type == "uint16":
+        score_type = ScoreType.uint16
+    elif requested_type == "uint32":
+        score_type = ScoreType.uint32
+    elif requested_type == "uint64":
+        score_type = ScoreType.uint64
+    elif requested_type != "auto":
+        raise Error("score_type must be auto, uint16, uint32, or uint64")
+    return score_type
 
 
 def integer_from(value: PythonObject) raises -> Int:
@@ -59,17 +74,19 @@ def matrix_from(preferences: PythonObject) raises -> PreferenceMatrix:
         if len(row) != num_candidates:
             raise Error("Preferences must be a square matrix")
         for column_index in range(num_candidates):
-            matrix[row_index, column_index] = UInt32(integer_from(row[column_index]))
+            var value = integer_from(row[column_index])
+            if value < 0 or UInt64(value) > UInt64(UInt32.MAX):
+                raise Error("Entries must fit UInt32")
+            matrix[row_index, column_index] = UInt32(value)
     return matrix^
 
 
-def strongest_paths(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
-    """Widest paths over winning votes, as a list of rows."""
-    var gpu = use_gpu(kwargs)
+def compute_strongest_paths(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
+    """Widest paths over winning votes, as a UInt32 NumPy matrix."""
+    var score_type = score_type_from(kwargs)
+    var backend = backend_from(kwargs)
     var matrix = matrix_from(preferences)
-    var strengths = compute_strongest_paths_gpu[TILE_SIZE](matrix) if gpu else compute_strongest_paths_tiled_cpu_simd[
-        TILE_SIZE
-    ](matrix)
+    var strengths = schulze.compute_strongest_paths(matrix, backend=backend, score_type=score_type)
 
     var rows = Python().list()
     for row_index in range(strengths.num_candidates):
@@ -77,31 +94,29 @@ def strongest_paths(preferences: PythonObject, var **kwargs: PythonObject) raise
         for column_index in range(strengths.num_candidates):
             row.append(PythonObject(Int(strengths[row_index, column_index])))
         rows.append(row)
-    return rows
+    return Python.import_module("numpy").array(rows, dtype="uint32")
 
 
-def kemeny_consensus(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
-    """The exact Kemeny-Young ranking and the disagreement it achieves."""
-    var gpu = use_gpu(kwargs)
+def compute_kemeny_ranking(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
+    """The exact Kemeny-Young ranking and disagreement, using a compiled score type specialization."""
+    var score_type = score_type_from(kwargs)
+    var backend = backend_from(kwargs)
     var matrix = matrix_from(preferences)
-    var solution = kemeny_ranking_gpu(matrix) if gpu else kemeny_ranking(matrix)
-
+    var solution = kemeny.compute_kemeny_ranking(matrix, backend=backend, score_type=score_type)
     var ranking = Python().list()
     for place in range(len(solution.ranking)):
         ranking.append(PythonObject(solution.ranking[place]))
-    var pair = Python().list()
-    pair.append(ranking)
-    pair.append(PythonObject(solution.score))
-    return pair
+    return Python().tuple(ranking, PythonObject(Int(solution.score)))
 
 
 def tally_ballots(rankings: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
-    """Counts complete rankings into a pairwise matrix, as a list of rows."""
-    var gpu = use_gpu(kwargs)
+    """Counts complete rankings into a UInt32 NumPy matrix."""
+    var backend = backend_from(kwargs)
     var num_ballots = len(rankings)
-    if num_ballots < 1:
-        raise Error("There must be at least one ballot")
-    var num_candidates = len(rankings[0])
+    var array = Python.import_module("numpy").asarray(rankings)
+    if integer_from(array.ndim) != 2:
+        raise Error("Rankings must be a two-dimensional array")
+    var num_candidates = integer_from(array.shape[1])
     if num_candidates < 1:
         raise Error("Every ballot must rank at least one candidate")
 
@@ -114,25 +129,22 @@ def tally_ballots(rankings: PythonObject, var **kwargs: PythonObject) raises -> 
         for position in range(num_candidates):
             flat.append(UInt32(integer_from(row[position])))
 
-    var counted = tally_ballots_gpu(flat, num_ballots, num_candidates) if gpu else tally_ballots_cpu(
-        flat, num_ballots, num_candidates
-    )
+    var counted = ballots.tally_ballots(flat, num_ballots, num_candidates, backend=backend)
     var rows = Python().list()
     for row_index in range(num_candidates):
         var row = Python().list()
         for column_index in range(num_candidates):
             row.append(PythonObject(Int(counted[row_index, column_index])))
         rows.append(row)
-    return rows
+    return Python.import_module("numpy").array(rows, dtype="uint32")
 
 
-def split_cycle(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
+def compute_split_cycle_winners(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
     """The Split Cycle winning set, which is every candidate nobody defeats."""
-    var gpu = use_gpu(kwargs)
+    var score_type = score_type_from(kwargs)
+    var backend = backend_from(kwargs)
     var matrix = matrix_from(preferences)
-    var undefeated = split_cycle_winners[compute_strongest_paths_gpu[TILE_SIZE, SeedGraph.positive_margins]](
-        matrix
-    ) if gpu else split_cycle_winners(matrix)
+    var undefeated = schulze.compute_split_cycle_winners(matrix, backend=backend, score_type=score_type)
 
     var winners = Python().list()
     for index in range(len(undefeated)):
@@ -145,10 +157,10 @@ def PyInit_scalingelections_mojo() abi("C") -> PythonObject:
     try:
         var builder = PythonModuleBuilder("scalingelections_mojo")
         builder.def_function[available_backends]("available_backends")
-        builder.def_function[strongest_paths]("strongest_paths")
-        builder.def_function[kemeny_consensus]("kemeny_consensus")
         builder.def_function[tally_ballots]("tally_ballots")
-        builder.def_function[split_cycle]("split_cycle")
+        builder.def_function[compute_strongest_paths]("compute_strongest_paths")
+        builder.def_function[compute_kemeny_ranking]("compute_kemeny_ranking")
+        builder.def_function[compute_split_cycle_winners]("compute_split_cycle_winners")
         return builder.finalize()
     except error:
         abort(String("Failed to initialize scalingelections_mojo: ", error))

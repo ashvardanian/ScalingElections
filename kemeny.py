@@ -10,6 +10,8 @@ import sys
 import numpy as np
 from numba import get_num_threads, njit, prange
 
+from ballots import ScoreType
+
 KEMENY_MAX_CANDIDATES = 33
 """The widest field an exact table can address, bounded by memory rather than by time."""
 
@@ -33,8 +35,8 @@ def kemeny_subset_sums(preferences: np.ndarray, low_bits: int):
     """
     num_candidates = preferences.shape[0]
     high_bits = num_candidates - low_bits
-    low = np.zeros((num_candidates, 1 << low_bits), dtype=np.int64)
-    high = np.zeros((num_candidates, 1 << high_bits), dtype=np.int64)
+    low = np.zeros((num_candidates, 1 << low_bits), dtype=preferences.dtype)
+    high = np.zeros((num_candidates, 1 << high_bits), dtype=preferences.dtype)
     for candidate in range(num_candidates):
         for offset in range(low_bits):
             bit = 1 << offset
@@ -100,7 +102,7 @@ def kemeny_next_subset(subset: int) -> int:
 
 
 @njit(parallel=True)
-def kemeny_costs(preferences: np.ndarray, low_bits: int, low, high):
+def kemeny_costs(preferences: np.ndarray, low_bits: int, low, high, score_type):
     """
     Computes the least disagreement achievable for every subset of candidates.
 
@@ -115,10 +117,9 @@ def kemeny_costs(preferences: np.ndarray, low_bits: int, low, high):
     binomials = kemeny_binomials(num_candidates)
     states = 1 << num_candidates
 
-    # Signed where the other ports are unsigned; the worst score is `n * (n - 1) / 2 * 2^32`, inside both.
-    costs = np.empty(states, dtype=np.int64)
+    costs = np.empty(states, dtype=score_type)
     costs[0] = 0
-    unreachable = np.int64(np.iinfo(np.int64).max)
+    unreachable = score_type(np.iinfo(score_type).max)
     for seated in range(1, num_candidates + 1):
         layer_states = binomials[num_candidates, seated]
         # Unranking walks the whole field, so a chunk pays it once and steps through the rest.
@@ -136,7 +137,7 @@ def kemeny_costs(preferences: np.ndarray, low_bits: int, low, high):
                     # Seating this candidate last within the subset costs the votes that preferred
                     # it to each of the others.
                     rest = subset ^ bit
-                    score = costs[rest] + kemeny_votes_against(low, high, low_bits, candidate, rest)
+                    score = score_type(costs[rest] + kemeny_votes_against(low, high, low_bits, candidate, rest))
                     if score < best:
                         best = score
                 costs[subset] = best
@@ -150,11 +151,11 @@ def kemeny_costs(preferences: np.ndarray, low_bits: int, low, high):
 # region Ranking
 
 
-def kemeny_table_bytes(num_candidates: int) -> int:
+def kemeny_table_bytes(num_candidates: int, score_type: ScoreType = ScoreType.uint64) -> int:
     """Bytes the cost table and both subset-sum tables occupy at this width."""
     low_bits = num_candidates // 2
     sums_states = num_candidates * ((1 << low_bits) + (1 << (num_candidates - low_bits)))
-    return ((1 << num_candidates) + sums_states) * np.dtype(np.int64).itemsize
+    return ((1 << num_candidates) + sums_states) * np.dtype(score_type.value).itemsize
 
 
 def available_host_bytes() -> int:
@@ -165,7 +166,27 @@ def available_host_bytes() -> int:
         return sys.maxsize
 
 
-def kemeny_ranking(preferences: np.ndarray) -> tuple[list[int], int]:
+def resolve_score_type(preferences: np.ndarray, score_type: ScoreType = ScoreType.auto) -> ScoreType:
+    """Select a width that represents every intermediate score, reserving its maximum as a sentinel."""
+    num_candidates = preferences.shape[0]
+    if num_candidates < 1 or num_candidates > KEMENY_MAX_CANDIDATES:
+        raise ValueError(f"Kemeny is exact to {KEMENY_MAX_CANDIDATES} candidates")
+
+    score_type = ScoreType(score_type)
+    bound = sum(
+        max(int(preferences[row, column]), int(preferences[column, row]))
+        for row in range(num_candidates)
+        for column in range(row + 1, num_candidates)
+    )
+    if score_type is ScoreType.auto:
+        score_type = ScoreType.uint32 if bound < np.iinfo(np.uint32).max else ScoreType.uint64
+    if bound >= np.iinfo(np.dtype(score_type.value)).max:
+        raise OverflowError("Kemeny score bound exceeds the selected arithmetic type")
+
+    return score_type
+
+
+def compute_kemeny_ranking(preferences: np.ndarray, *, score_type: ScoreType = ScoreType.auto) -> tuple[list[int], int]:
     """
     Determines the exact Kemeny-Young consensus ranking and its disagreement score.
 
@@ -177,11 +198,11 @@ def kemeny_ranking(preferences: np.ndarray) -> tuple[list[int], int]:
     Time complexity: O(n * 2^n), where n is the number of candidates.
     """
     num_candidates = preferences.shape[0]
-    if num_candidates < 1 or num_candidates > KEMENY_MAX_CANDIDATES:
-        raise ValueError(f"Kemeny is exact to {KEMENY_MAX_CANDIDATES} candidates, reaching 64 GiB at that width")
+    score_type = resolve_score_type(preferences, score_type)
+    score_dtype = np.dtype(score_type.value).type
 
     # NumPy reports an unaffordable table as a bare `MemoryError`, so the size is refused by name here.
-    wanted_bytes = kemeny_table_bytes(num_candidates)
+    wanted_bytes = kemeny_table_bytes(num_candidates, score_type)
     free_bytes = available_host_bytes()
     if wanted_bytes + KEMENY_HOST_HEADROOM > free_bytes:
         raise MemoryError(
@@ -189,10 +210,11 @@ def kemeny_ranking(preferences: np.ndarray) -> tuple[list[int], int]:
             f"of which {free_bytes >> 20} MiB is free"
         )
 
-    counts = preferences.astype(np.int64)
+    counts = preferences.astype(score_dtype)
+    np.fill_diagonal(counts, 0)
     low_bits = num_candidates // 2
     low, high = kemeny_subset_sums(counts, low_bits)
-    costs = kemeny_costs(counts, low_bits, low, high)
+    costs = kemeny_costs(counts, low_bits, low, high, score_dtype)
 
     # Walk the choices back out, which recovers the ranking from its last seat upwards.
     ranking = []

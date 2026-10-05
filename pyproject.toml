@@ -29,7 +29,11 @@ py-modules = ["scalingelections", "ballots", "schulze", "kemeny"]
 
 [tool.pytest.ini_options]
 addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config"]
-filterwarnings = ["error"]
+filterwarnings = [
+  "error",
+  # OR-Tools' SWIG initializer crashes when these upstream deprecations become exceptions.
+  "ignore:builtin type (SwigPyPacked|SwigPyObject|swigvarlink) has no __module__ attribute:DeprecationWarning",
+]
 markers = ["slow: the exhaustive Kemeny searches; deselect with -m 'not slow'"]
 minversion = "6.0"
 xfail_strict = true

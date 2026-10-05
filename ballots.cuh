@@ -17,7 +17,8 @@
  *  A cell keeps its vote count only where it strictly beats the opposite direction, so ties, losses,
  *  and the diagonal all read as zero, the identity of the max-min semiring.
  */
-inline void winning_votes_graph(const_matrix_t preferences, matrix_t graph) {
+template <typename score_type_>
+inline void winning_votes_graph(const_matrix_t preferences, strided_matrix<score_type_> graph) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
 #pragma omp parallel for collapse(2)
@@ -45,7 +46,8 @@ enum class seed_graph_t : std::uint8_t {
  *  A cell keeps its margin only where the pair is won, so at most one direction of any pair is
  *  ever non-zero. That is what lets the unchanged max-min kernel close over margins.
  */
-inline void positive_margins_graph(const_matrix_t preferences, matrix_t graph) {
+template <typename score_type_>
+inline void positive_margins_graph(const_matrix_t preferences, strided_matrix<score_type_> graph) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
 #pragma omp parallel for collapse(2)
@@ -58,7 +60,8 @@ inline void positive_margins_graph(const_matrix_t preferences, matrix_t graph) {
 }
 
 /** Seeds the matrix with whichever graph the method is defined on. */
-inline void seed_graph(const_matrix_t preferences, matrix_t graph, seed_graph_t which) {
+template <typename score_type_>
+inline void seed_graph(const_matrix_t preferences, strided_matrix<score_type_> graph, seed_graph_t which) {
     if (which == seed_graph_t::positive_margins_k) positive_margins_graph(preferences, graph);
     else winning_votes_graph(preferences, graph);
 }
@@ -74,7 +77,9 @@ inline void seed_graph(const_matrix_t preferences, matrix_t graph, seed_graph_t 
  *  and exceeds the widest path running back the other way. The set is irresolute by Theorem 4.7,
  *  so it can name several winners where Schulze names one.
  */
-inline std::vector<candidate_index_t> split_cycle_winners(const_matrix_t preferences, const_matrix_t margin_paths) {
+template <typename score_type_>
+inline std::vector<candidate_index_t> select_split_cycle_winners(const_matrix_t preferences,
+                                                                 strided_matrix<score_type_> margin_paths) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
     std::vector<candidate_index_t> undefeated;
@@ -94,16 +99,6 @@ inline std::vector<candidate_index_t> split_cycle_winners(const_matrix_t prefere
 
 #pragma region Tally
 
-/** Which processor folds ranked ballots into the pairwise matrix. */
-enum class tally_backend_t : std::uint8_t {
-    /** Picks by candidate count, since that is what sets the work each transferred byte pays for. */
-    automatic_k,
-    /** One private matrix per host thread, reduced once at the end. */
-    cpu_openmp_k,
-    /** One private matrix per block in shared memory, merged into global once at block exit. */
-    gpu_privatized_k,
-};
-
 /**
  *  @brief Adds one chunk of complete rankings into an existing pairwise matrix.
  *
@@ -113,7 +108,7 @@ enum class tally_backend_t : std::uint8_t {
  *  Accumulating rather than assigning is what lets an electorate arrive in chunks instead of
  *  having to sit in memory all at once.
  */
-inline void tally_ballots_openmp(ballots_t rankings, matrix_t preferences) {
+inline void tally_ballots_cpu(ballots_t rankings, matrix_t preferences) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
     std::size_t const num_ballots = rankings.extent(0);
@@ -141,13 +136,6 @@ inline void tally_ballots_openmp(ballots_t rankings, matrix_t preferences) {
 
 /** Threads per block for the tally, chosen so one block still fits a private matrix in shared memory. */
 constexpr std::uint32_t tally_block_size_k = 256;
-
-/**
- *  Below this many candidates a ballot carries too few increments per transferred byte to pay for
- *  the trip. Measured on an idle box, sixteen host threads against one H100: the device trails at
- *  12 and leads at 16. A host with far more cores moves the crossing upward.
- */
-constexpr candidate_index_t tally_device_crossover_k = 16;
 
 /** Shared bytes one tally block needs: a private matrix, plus the ballot each warp is staging. */
 inline std::size_t tally_shared_bytes(candidate_index_t num_candidates) noexcept {
@@ -224,7 +212,7 @@ inline bool device_can_read(void const* pointer) noexcept {
  *  Rankings the device can already reach are read where they lie, so a caller streaming chunks
  *  through one managed buffer pays for the staging once rather than once per chunk.
  */
-inline void tally_ballots_cuda(ballots_t rankings, matrix_t preferences) {
+inline void tally_ballots_gpu(ballots_t rankings, matrix_t preferences) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
     std::size_t const num_ballots = rankings.extent(0);
@@ -233,8 +221,8 @@ inline void tally_ballots_cuda(ballots_t rankings, matrix_t preferences) {
     if (cudaGetDevice(&device) != cudaSuccess || cudaGetDeviceProperties(&device_properties, device) != cudaSuccess)
         throw std::runtime_error("No CUDA devices available");
     if (!tally_fits_shared_memory(num_candidates, device_properties))
-        throw std::runtime_error("A tally over " + std::to_string(num_candidates) +
-                                 " candidates needs more shared memory than a block can hold");
+        throw std::invalid_argument("A tally over " + std::to_string(num_candidates) +
+                                    " candidates needs more shared memory than a block can hold");
 
     std::size_t const ballot_stride = rankings.stride(0);
     std::size_t const entries = num_ballots ? (num_ballots - 1) * ballot_stride + num_candidates : 0;
@@ -272,27 +260,18 @@ inline void tally_ballots_cuda(ballots_t rankings, matrix_t preferences) {
 }
 
 /** Adds one chunk of complete rankings into an existing matrix, on whichever processor was named. */
-inline void tally_ballots(ballots_t rankings, matrix_t preferences, tally_backend_t backend) {
-    if (backend == tally_backend_t::cpu_openmp_k) return tally_ballots_openmp(rankings, preferences);
-    if (backend == tally_backend_t::gpu_privatized_k) return tally_ballots_cuda(rankings, preferences);
-
-    int devices = 0;
-    cudaDeviceProp device_properties;
-    bool const device_serves = preferences.extent(0) >= tally_device_crossover_k &&
-                               cudaGetDeviceCount(&devices) == cudaSuccess && devices > 0 &&
-                               cudaGetDeviceProperties(&device_properties, 0) == cudaSuccess &&
-                               tally_fits_shared_memory(preferences.extent(0), device_properties);
-    if (device_serves) return tally_ballots_cuda(rankings, preferences);
-    tally_ballots_openmp(rankings, preferences);
+inline void tally_ballots(ballots_t rankings, matrix_t preferences, backend_t backend) {
+    if (backend == backend_t::cpu_k) return tally_ballots_cpu(rankings, preferences);
+    return tally_ballots_gpu(rankings, preferences);
 }
 
 #else
 
 /** Adds one chunk of complete rankings into an existing matrix; a CPU-only build has one processor. */
-inline void tally_ballots(ballots_t rankings, matrix_t preferences, tally_backend_t backend) {
-    if (backend == tally_backend_t::gpu_privatized_k)
-        throw std::runtime_error("This build has no CUDA support, so `gpu_privatized` is unavailable");
-    tally_ballots_openmp(rankings, preferences);
+inline void tally_ballots(ballots_t rankings, matrix_t preferences, backend_t backend) {
+    if (backend == backend_t::gpu_k)
+        throw std::runtime_error("This build has no CUDA support, so `gpu` is unavailable");
+    tally_ballots_cpu(rankings, preferences);
 }
 
 #endif // defined(SCALING_ELECTIONS_WITH_CUDA)

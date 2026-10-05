@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "build"))
@@ -92,47 +93,38 @@ def seed(__pytest_repeat_step_number) -> int:
     return derived_seed((__pytest_repeat_step_number or 0) * randomized_repetitions_count)
 
 
-@pytest.fixture(scope="session")
-def gpu_ready() -> bool:
-    """Whether a device backend can actually run, as opposed to a CPU-only build or an empty box."""
-    return cuda_device_ready()
-
-
 @dataclass(frozen=True)
 class Implementation:
-    """One execution target with the same four operations across native extensions."""
+    """One implementation and execution target exposing the common operations."""
 
-    target: str
-    strongest_paths: Callable
-    kemeny_consensus: Callable
-    split_cycle: Callable
-    tally_ballots: Callable
+    tally_ballots: Callable[..., np.ndarray]
+    compute_strongest_paths: Callable[..., np.ndarray]
+    compute_kemeny_ranking: Callable[..., tuple[list[int], int]]
+    compute_split_cycle_winners: Callable[..., list[int]]
 
 
-@pytest.fixture(scope="session", params=("cpp-cpu", "cpp-gpu", "mojo-cpu", "mojo-gpu"))
+@pytest.fixture(scope="session", params=("python-cpu", "cpp-cpu", "cpp-gpu", "mojo-cpu", "mojo-gpu"))
 def implementation(request) -> Implementation:
     language, target = request.param.split("-")
-    module_name = "scalingelections_cuda" if language == "cpp" else "scalingelections_mojo"
-    module = pytest.importorskip(module_name)
-    if target not in module.available_backends():
+    import scalingelections as module
+    from scalingelections import Backend
+
+    target = Backend(target)
+
+    if language != "python":
+        pytest.importorskip("scalingelections_cuda" if language == "cpp" else "scalingelections_mojo")
+    if target not in module.available_backends(implementation=language):
         pytest.skip(f"{request.param} is unavailable")
-    if language == "mojo":
-        return Implementation(
-            target,
-            *(
-                functools.partial(getattr(module, name), backend=target)
-                for name in ("strongest_paths", "kemeny_consensus", "split_cycle", "tally_ballots")
-            ),
-        )
-    paths = "gpu_serial" if target == "gpu" else "cpu_openmp"
-    consensus = "gpu_layered" if target == "gpu" else "cpu_openmp"
-    tally = "gpu_privatized" if target == "gpu" else "cpu_openmp"
     return Implementation(
-        target,
-        functools.partial(module.compute_strongest_paths, backend=paths),
-        functools.partial(module.compute_kemeny_ranking, backend=consensus),
-        functools.partial(module.compute_split_cycle_winners, backend=paths),
-        functools.partial(module.tally_ballots, backend=tally),
+        *(
+            functools.partial(getattr(module, name), implementation=language, backend=target)
+            for name in (
+                "tally_ballots",
+                "compute_strongest_paths",
+                "compute_kemeny_ranking",
+                "compute_split_cycle_winners",
+            )
+        ),
     )
 
 
