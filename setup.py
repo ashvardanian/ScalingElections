@@ -385,15 +385,7 @@ else:
                     python_include,
                     *CCCL_INCLUDE,
                 ],
-                library_dirs=[
-                    python_lib_dir,
-                ],
-                libraries=[
-                    python_lib_name,
-                ],
-                extra_link_args=[
-                    f"-Wl,-rpath,{python_lib_dir}",
-                ],
+                extra_link_args=["-undefined", "dynamic_lookup"],
                 language="c++",
             ),
         ]

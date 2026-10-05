@@ -53,11 +53,14 @@ from scalingelections import tally_chunks
 preferences = tally_chunks(read_ballots_in_blocks(), num_candidates=20)
 ```
 
-The Mojo kernels build and validate through [pixi](https://pixi.sh):
+The Mojo kernels build with Mojo 1.1 and MAX 26.6 through [pixi](https://pixi.sh), on Linux and Apple silicon macOS.
+On macOS, the GPU kernels use Metal and require macOS 15 or later, Xcode 16 or later, and the Metal toolchain.
+If the toolchain is missing, install it with `xcodebuild -downloadComponent MetalToolchain`.
 
 ```sh
-pixi run test     # cross-checks all three languages against each other
-pixi run bench    # the headline problem size
+pixi run build   # builds the Python bindings and native CLI
+pixi run test    # cross-checks all three languages; requires `uv sync` first
+pixi run bench   # the headline problem size
 ```
 
 ## What's Inside

@@ -250,7 +250,7 @@ def reject_unknown_flags(
     args: Span[StaticString, ImmStaticOrigin],
 ) raises:
     """Rejects unrecognized flags, so a typo cannot silently use defaults."""
-    comptime valued = (
+    var valued: List[String] = [
         "--num-candidates",
         "--num-voters",
         "--warmup",
@@ -258,19 +258,19 @@ def reject_unknown_flags(
         "--seed",
         "--filter",
         "-k",
-    )
-    comptime bare = ("--help", "-h")
+    ]
+    var bare: List[String] = ["--help", "-h"]
     var index = 1
     while index < len(args):
         var argument = String(args[index])
         var matched = False
 
-        comptime for slot in range(len(valued)):
+        for slot in range(len(valued)):
             if not matched and argument == valued[slot]:
                 matched = True
                 index += 1
 
-        comptime for slot in range(len(bare)):
+        for slot in range(len(bare)):
             if argument == bare[slot]:
                 matched = True
 

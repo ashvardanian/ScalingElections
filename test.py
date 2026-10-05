@@ -469,19 +469,19 @@ TILE_BOUNDARY_SIZES = (1, 2, 31, 32, 33, 47, 63, 64, 65, 96, 97, 129)
 
 
 @pytest.mark.parametrize("num_candidates", TILE_BOUNDARY_SIZES)
-def test_backends_agree_across_tile_boundaries(num_candidates: int, seed: int, mojo):
+def test_backends_agree_across_tile_boundaries(num_candidates: int, seed: int, mojo, gpu_ready: bool):
     """Every backend must match the serial baseline whether or not the tile divides the electorate."""
     preferences = random_profile(seed=seed + num_candidates, num_candidates=num_candidates, num_voters=25)
     expected = schulze.compute_strongest_paths_numba_serial(preferences)
     assert np.array_equal(schulze.compute_strongest_paths_numba_parallel(preferences), expected)
-    for backend in CUDA_BACKENDS:
+    for backend in CUDA_BACKENDS if gpu_ready else ("cpu_openmp",):
         assert np.array_equal(cuda.compute_strongest_paths(preferences, backend=backend), expected), backend
     from_mojo = np.asarray(mojo.strongest_paths(preferences.tolist()), dtype=np.uint32)
     assert np.array_equal(from_mojo, expected)
 
 
 @pytest.mark.parametrize("step", range(randomized_repetitions_count))
-def test_languages_agree_on_random_profiles(step: int, seed: int, mojo):
+def test_languages_agree_on_random_profiles(step: int, seed: int, mojo, gpu_ready: bool):
     """Schulze and Kemeny must agree across all three ports on profiles nobody chose by hand."""
     num_candidates = 2 + step % 9
     spread = BallotSpread.half_replayed if step % 3 == 0 else BallotSpread.distinct
@@ -490,7 +490,7 @@ def test_languages_agree_on_random_profiles(step: int, seed: int, mojo):
     )
 
     expected = schulze.compute_strongest_paths_numba_serial(preferences)
-    for backend in CUDA_BACKENDS:
+    for backend in CUDA_BACKENDS if gpu_ready else ("cpu_openmp",):
         assert np.array_equal(cuda.compute_strongest_paths(preferences, backend=backend), expected), backend
     assert np.array_equal(np.asarray(mojo.strongest_paths(preferences.tolist()), dtype=np.uint32), expected)
 

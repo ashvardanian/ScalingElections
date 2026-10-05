@@ -67,7 +67,7 @@ def pytest_report_header() -> list[str]:
         f"repetitions: {randomized_repetitions_count}, exhaustive scale: {exhaustive_scale}",
         f"cuda: {installed_module_path('scalingelections_cuda') or 'extension not built'}",
         f"device: {'gpu_serial answers' if cuda_device_ready() else 'none visible, device cases skip'}",
-        f"mojo: {installed_module_path('scalingelections_mojo') or 'not built, run `pixi run build`'}",
+        f"mojo: {installed_module_path('scalingelections_mojo') or 'not built, run `pixi run build-bindings`'}",
         f"oracles: pref_voting {_oracle_state('pref_voting')}, igraph {_oracle_state('igraph')}",
     ]
 
@@ -104,7 +104,7 @@ def gpu_ready() -> bool:
 @pytest.fixture(scope="session")
 def mojo():
     """The Mojo extension from `build/`, skipping the case when it has not been compiled."""
-    return pytest.importorskip("scalingelections_mojo", reason="Build it with `pixi run build`")
+    return pytest.importorskip("scalingelections_mojo", reason="Build it with `pixi run build-bindings`")
 
 
 @pytest.fixture(scope="session")

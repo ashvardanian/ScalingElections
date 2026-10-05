@@ -175,8 +175,7 @@ def kemeny_ranking(preferences: PreferenceMatrix) raises -> KemenySolution:
         var layer_states = Int(binomials[num_candidates * binomials_stride + seated])
         var chunks = (layer_states + KEMENY_LAYER_CHUNK - 1) // KEMENY_LAYER_CHUNK
 
-        @parameter
-        def fill_layer_chunk(chunk: Int):
+        def fill_layer_chunk(chunk: Int) {imm}:
             var first_rank = chunk * KEMENY_LAYER_CHUNK
             var last_rank = min(first_rank + KEMENY_LAYER_CHUNK, layer_states)
             var subset = subset_at_colex_rank(binomials, num_candidates, layer_seated, first_rank)
@@ -199,7 +198,7 @@ def kemeny_ranking(preferences: PreferenceMatrix) raises -> KemenySolution:
                 var ripple = subset + lowest
                 subset = ripple | (((subset ^ ripple) >> 2) // lowest)
 
-        parallelize[fill_layer_chunk](chunks)
+        parallelize(fill_layer_chunk, chunks)
 
     # Walk the choices back out, which recovers the ranking from its last place upwards.
     var ranking = List[Int]()

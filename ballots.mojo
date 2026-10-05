@@ -10,13 +10,12 @@ accessor, so `VoteMatrix` is the storage and the aliases below name the reading.
 of each pairwise contest, which is where every Schulze backend starts.
 """
 
-from std.memory import AddressSpace, Layout, alloc, stack_allocation, unsafe_memset_zero
 from std.atomic import Atomic
-from std.gpu import block_dim, block_idx, grid_dim, thread_idx
+from std.memory import AddressSpace, Layout, alloc, stack_allocation, unsafe_memset_zero
 from std.random.philox import Random
 
 from max.algorithm import parallelize
-from max.gpu import barrier
+from max.gpu import barrier, block_dim, block_idx, grid_dim, thread_idx
 from max.gpu.host import DeviceContext
 
 # region Matrix
@@ -87,8 +86,7 @@ def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value
 
     if num_voters == 0:
 
-        @parameter
-        def fill_row(row: Int):
+        def fill_row(row: Int) {imm}:
             # Seeded per row, so parallel workers share no state to race on.
             var generator = Random(seed=UInt64(seed_value), offset=UInt64(row))
             var bound = UInt32(num_candidates)
@@ -98,10 +96,10 @@ def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value
                 var draws = generator.step()
                 var lanes = min(len(draws), num_candidates - column)
                 for lane in range(lanes):
-                    preferences[row, column + lane] = draws[lane] % bound
+                    preferences.data[unsafe_offset=row * num_candidates + column + lane] = draws[lane] % bound
                 column += lanes
 
-        parallelize[fill_row](num_candidates)
+        parallelize(fill_row, num_candidates)
         return preferences^
 
     var ranking = List[Int]()
@@ -150,8 +148,7 @@ def winning_votes_graph(
     """
     var num_candidates = preferences.num_candidates
 
-    @parameter
-    def fill_row(row: Int):
+    def fill_row(row: Int) {imm}:
         for column in range(num_candidates):
             if row != column:
                 var forward = preferences[row, column]
@@ -161,7 +158,7 @@ def winning_votes_graph(
                 else:
                     graph[unsafe_offset=row * row_stride + column] = 0
 
-    parallelize[fill_row](num_candidates)
+    parallelize(fill_row, num_candidates)
 
 
 @fieldwise_init
@@ -197,15 +194,14 @@ def positive_margins_graph(
     """
     var num_candidates = preferences.num_candidates
 
-    @parameter
-    def fill_row(row: Int):
+    def fill_row(row: Int) {imm}:
         for column in range(num_candidates):
             var forward = preferences[row, column]
             var backward = preferences[column, row]
             var margin = forward - backward if row != column and forward > backward else UInt32(0)
             graph[unsafe_offset=row * row_stride + column] = margin
 
-    parallelize[fill_row](num_candidates)
+    parallelize(fill_row, num_candidates)
 
 
 def seed_graph(
@@ -327,4 +323,5 @@ def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
     var counts_ptr = host_counts.unsafe_ptr()
     for cell in range(cells):
         preferences.data[unsafe_offset=cell] = counts_ptr[unsafe_offset=cell]
+    deinit(host_counts^)
     return preferences^

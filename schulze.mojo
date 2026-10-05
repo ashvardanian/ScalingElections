@@ -13,19 +13,18 @@ masking. The GPU version runs those same phases as three kernels per diagonal ti
 """
 
 from std.builtin.sort import sort
-from std.gpu import block_idx, thread_idx
 from std.math import iota
 from std.memory import AddressSpace, stack_allocation, unsafe_memcpy, unsafe_memset_zero
 
 from max.algorithm import parallelize
-from max.gpu import barrier
+from max.gpu import barrier, block_idx, thread_idx
 from max.gpu.host import DeviceContext
 
 from ballots import (
-    SeedGraph,
-    seed_graph,
     PreferenceMatrix,
+    SeedGraph,
     StrongestPathsMatrix,
+    seed_graph,
 )
 
 
@@ -416,8 +415,7 @@ def compute_strongest_paths_tiled_cpu[
         )
 
         # Partially dependent phases - row tiles
-        @parameter
-        def process_row_tiles(tile: Int):
+        def process_row_tiles(tile: Int) {imm}:
             if tile == pivot_index:
                 return
 
@@ -464,11 +462,10 @@ def compute_strongest_paths_tiled_cpu[
                 num_candidates,
             )
 
-        parallelize[process_row_tiles](num_tiles)
+        parallelize(process_row_tiles, num_tiles)
 
         # Partially dependent phases - column tiles
-        @parameter
-        def process_col_tiles(tile: Int):
+        def process_col_tiles(tile: Int) {imm}:
             if tile == pivot_index:
                 return
 
@@ -515,11 +512,10 @@ def compute_strongest_paths_tiled_cpu[
                 num_candidates,
             )
 
-        parallelize[process_col_tiles](num_tiles)
+        parallelize(process_col_tiles, num_tiles)
 
         # Independent phase
-        @parameter
-        def process_independent_tiles(flat_index: Int):
+        def process_independent_tiles(flat_index: Int) {imm}:
             var row_tile = flat_index // num_tiles
             var column_tile = flat_index % num_tiles
 
@@ -580,7 +576,7 @@ def compute_strongest_paths_tiled_cpu[
                 num_candidates,
             )
 
-        parallelize[process_independent_tiles](num_tiles * num_tiles)
+        parallelize(process_independent_tiles, num_tiles * num_tiles)
 
     return strongest_paths^
 
@@ -657,8 +653,7 @@ def compute_strongest_paths_tiled_cpu_simd[
         )
 
         # Partially dependent phases - row and column tiles
-        @parameter
-        def process_row_col_tiles(tile: Int):
+        def process_row_col_tiles(tile: Int) {imm}:
             if tile == pivot_index:
                 return
 
@@ -746,11 +741,10 @@ def compute_strongest_paths_tiled_cpu_simd[
                 num_candidates,
             )
 
-        parallelize[process_row_col_tiles](num_tiles)
+        parallelize(process_row_col_tiles, num_tiles)
 
         # Independent phase: uses fast SIMD processor (no diagonal checks)
-        @parameter
-        def process_independent_tiles(flat_index: Int):
+        def process_independent_tiles(flat_index: Int) {imm}:
             var row_tile = flat_index // num_tiles
             var column_tile = flat_index % num_tiles
 
@@ -814,7 +808,7 @@ def compute_strongest_paths_tiled_cpu_simd[
                 num_candidates,
             )
 
-        parallelize[process_independent_tiles](num_tiles * num_tiles)
+        parallelize(process_independent_tiles, num_tiles * num_tiles)
 
     return strongest_paths^
 
@@ -1150,6 +1144,7 @@ def compute_strongest_paths_gpu[
     var ctx = DeviceContext()
     var host_graph = ctx.enqueue_create_host_buffer[DType.uint32](padded * padded)
     var device_graph = ctx.enqueue_create_buffer[DType.uint32](padded * padded)
+    ctx.synchronize()
     var host_ptr = host_graph.unsafe_ptr()
     unsafe_memset_zero(host_ptr, padded * padded)
 
@@ -1198,6 +1193,8 @@ def compute_strongest_paths_gpu[
             src=host_ptr.unsafe_offset(row * padded),
             count=num_candidates,
         )
+    # The untracked pointer does not keep its host allocation alive.
+    deinit(host_graph^)
 
     return result^
 
