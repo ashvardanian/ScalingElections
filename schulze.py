@@ -22,9 +22,11 @@ TILE_SIZE = 32
 def resolve_score_type(preferences: np.ndarray, score_type: ScoreType = ScoreType.auto) -> ScoreType:
     """Select arithmetic that represents every path edge; max-min never increases its maximum."""
     score_type = ScoreType(score_type)
+    if score_type is ScoreType.saturated64 and np.any(preferences == np.iinfo(np.uint64).max):
+        raise OverflowError("Schulze input contains the saturation sentinel")
     if score_type is ScoreType.auto:
-        score_type = ScoreType.uint32
-    if np.max(preferences) > np.iinfo(np.dtype(score_type.value)).max:
+        score_type = ScoreType.uint32 if np.max(preferences) <= np.iinfo(np.uint32).max else ScoreType.uint64
+    if np.max(preferences) > np.iinfo(np.dtype(f"uint{score_type.bits}")).max:
         raise OverflowError("Schulze edge exceeds the selected arithmetic type")
     return score_type
 
@@ -248,16 +250,16 @@ def select_split_cycle_winners(preferences: np.ndarray, margin_paths: np.ndarray
     Time complexity: O(n^2), where n is the number of candidates.
     """
     margins = positive_margins(preferences)
-    defeats = (margins > 0) & (margins > margin_paths.astype(np.int64).T)
+    defeats = (margins > 0) & (margins > margin_paths.T)
     return [candidate for candidate in range(preferences.shape[0]) if not defeats[:, candidate].any()]
 
 
 def compute_election_results(
     candidates: list[int],
     strongest_paths: np.ndarray,
-) -> tuple[int, list[int]]:
+) -> tuple[list[int], list[int]]:
     """
-    Determines the winner and the overall ranking of candidates based on the strongest paths matrix.
+    Returns every undefeated candidate and a deterministic representative ranking from the strongest paths matrix.
 
     Space complexity: O(n), where n is the number of candidates.
     Time complexity: O(n^2), where n is the number of candidates.
@@ -271,10 +273,14 @@ def compute_election_results(
                 wins[source] += 1
 
     ranking_indices = sorted(range(num_candidates), key=lambda candidate: wins[candidate], reverse=True)
-    winner = candidates[ranking_indices[0]]
+    winners = [
+        candidates[index]
+        for index in range(num_candidates)
+        if not np.any(strongest_paths[:, index] > strongest_paths[index, :])
+    ]
     ranked_candidates = [candidates[index] for index in ranking_indices]
 
-    return winner, ranked_candidates
+    return winners, ranked_candidates
 
 
 # endregion Winners

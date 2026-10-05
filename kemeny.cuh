@@ -16,50 +16,54 @@
  *  One table would be `n * 2^n` wide. Splitting the subset into a low and a high half makes
  *  two of `n * 2^(n/2)`, small enough to stay in cache while the score table streams past.
  */
-template <typename score_type_ = std::uint64_t>
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t>
 struct kemeny_sums {
-    using score_t = score_type_;
+    using arithmetic_t = arithmetic_type_;
     candidate_index_t const low_bits;
     std::size_t const low_states;
     std::size_t const high_states;
-    std::vector<score_t> low;
-    std::vector<score_t> high;
+    std::vector<arithmetic_t> low;
+    std::vector<arithmetic_t> high;
 
-    kemeny_sums(votes_count_t const* preferences, candidate_index_t num_candidates)
+    template <typename stored_count_type_>
+    kemeny_sums(stored_count_type_ const* preferences, candidate_index_t num_candidates)
         : low_bits(num_candidates / 2), low_states(std::size_t {1} << low_bits),
           high_states(std::size_t {1} << (num_candidates - low_bits)), low(num_candidates * low_states, 0),
           high(num_candidates * high_states, 0) {
-
+        using stored_count_t = stored_count_type_;
         for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
-            votes_count_t const* row = preferences + candidate * num_candidates;
+            stored_count_t const* row = preferences + candidate * num_candidates;
             accumulate(low.data() + candidate * low_states, low_states, row, 0, candidate);
             accumulate(high.data() + candidate * high_states, high_states, row + low_bits, low_bits, candidate);
         }
     }
 
     /** Votes that preferred @p candidate to every member of @p subset. */
-    score_t against(candidate_index_t candidate, std::size_t subset) const noexcept {
+    arithmetic_t against(candidate_index_t candidate, std::size_t subset) const noexcept {
         return low[candidate * low_states + (subset & (low_states - 1))] +
                high[candidate * high_states + (subset >> low_bits)];
     }
 
   private:
     // Ignore diagonal entries so they cannot overflow a narrowed subset sum.
-    static void accumulate(score_t* row, std::size_t states, votes_count_t const* votes,
+    template <typename stored_count_type_>
+    static void accumulate(arithmetic_t* row, std::size_t states, stored_count_type_ const* votes,
                            candidate_index_t first_opponent, candidate_index_t candidate) noexcept {
         candidate_index_t opponent = first_opponent;
         for (std::size_t bit = 1; bit < states; bit <<= 1, votes++, opponent++)
             for (std::size_t subset = bit; subset < states; subset++)
-                if (subset & bit) row[subset] = row[subset ^ bit] + (opponent == candidate ? 0 : *votes);
+                if (subset & bit) row[subset] = row[subset ^ bit] + arithmetic_t(opponent == candidate ? 0 : *votes);
     }
 };
 
 /** An exact Kemeny-Young consensus ranking and the disagreement it achieves. */
-template <typename score_type_ = std::uint64_t>
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t>
 struct kemeny_solution {
-    using score_t = score_type_;
+    using arithmetic_t = arithmetic_type_;
     std::vector<candidate_index_t> ranking;
-    score_t score = 0;
+    arithmetic_t score = 0;
+    std::vector<candidate_index_t> winners;
+    bool unique = true;
 };
 
 /** The widest field an exact table can address, bounded by device memory rather than by time. */
@@ -72,22 +76,24 @@ inline void kemeny_require_supported_width_(candidate_index_t num_candidates) {
                                     " candidates");
 }
 
-inline std::uint64_t kemeny_score_bound_(votes_count_t const* preferences, candidate_index_t n) {
+template <typename stored_count_type_>
+inline std::uint64_t kemeny_score_bound_(stored_count_type_ const* preferences, candidate_index_t n) {
     kemeny_require_supported_width_(n);
-    std::uint64_t bound = 0;
+    saturated<std::uint64_t> bound = 0;
     for (candidate_index_t row = 0; row < n; row++)
         for (candidate_index_t column = row + 1; column < n; column++)
             bound += std::max(preferences[row * n + column], preferences[column * n + row]);
-    return bound;
+    return static_cast<std::uint64_t>(bound);
 }
 
-template <typename score_type_>
-inline void kemeny_require_score_range_(votes_count_t const* preferences, candidate_index_t n) {
-    using score_t = score_type_;
-    static_assert(std::numeric_limits<score_t>::is_integer && !std::numeric_limits<score_t>::is_signed);
-    static_assert(sizeof(score_t) <= sizeof(std::uint64_t));
-    if (kemeny_score_bound_(preferences, n) >= std::numeric_limits<score_t>::max())
-        throw std::overflow_error("Kemeny score bound exceeds the selected arithmetic type");
+template <typename arithmetic_type_, typename stored_count_type_>
+inline void kemeny_require_score_range_(stored_count_type_ const* preferences, candidate_index_t n) {
+    using arithmetic_t = arithmetic_type_;
+    static_assert(std::numeric_limits<arithmetic_t>::is_integer && !std::numeric_limits<arithmetic_t>::is_signed);
+    static_assert(sizeof(arithmetic_t) <= sizeof(std::uint64_t));
+    if constexpr (!std::is_same_v<arithmetic_t, saturated<std::uint64_t>>)
+        if (kemeny_score_bound_(preferences, n) >= std::numeric_limits<arithmetic_t>::max())
+            throw std::overflow_error("Kemeny score bound exceeds the selected arithmetic type");
 }
 
 /**
@@ -152,30 +158,43 @@ constexpr std::int64_t kemeny_chunk_size_k = 1024;
  *  Every backend fills the same table, so recovering the ranking in one place is also what
  *  keeps their tie-breaking identical.
  */
-template <typename score_type_ = std::uint64_t>
-inline kemeny_solution<score_type_> kemeny_trace_(kemeny_sums<score_type_> const& sums, score_type_ const* costs,
-                                                  candidate_index_t num_candidates) {
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t, typename stored_count_type_>
+inline kemeny_solution<arithmetic_type_> kemeny_trace_(kemeny_sums<arithmetic_type_> const& sums,
+                                                       arithmetic_type_ const* costs, candidate_index_t num_candidates,
+                                                       stored_count_type_ const* preferences) {
+    using arithmetic_t = arithmetic_type_;
     std::size_t const states = std::size_t {1} << num_candidates;
 
-    kemeny_solution<score_type_> solution;
+    kemeny_solution<arithmetic_t> solution;
     solution.score = costs[states - 1];
+    if (solution.score == std::numeric_limits<arithmetic_t>::max())
+        throw std::overflow_error("Kemeny optimum reaches the overflow sentinel");
     solution.ranking.reserve(num_candidates);
 
     for (std::size_t subset = states - 1; subset;) {
         std::size_t const before = subset;
+        unsigned choices = 0;
         for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
             std::size_t const bit = std::size_t {1} << candidate;
-            if (!(subset & bit)) continue;
-            std::size_t const rest = subset ^ bit;
-            if (costs[subset] != costs[rest] + sums.against(candidate, rest)) continue;
-            solution.ranking.push_back(candidate);
-            subset = rest;
-            break;
+            if (!(before & bit)) continue;
+            std::size_t const rest = before ^ bit;
+            if (costs[before] != costs[rest] + sums.against(candidate, rest)) continue;
+            if (++choices == 1) {
+                solution.ranking.push_back(candidate);
+                subset = rest;
+            }
         }
         // Every subset was filled from one of its members, so one of them has to match back.
         if (subset == before) throw std::runtime_error("The Kemeny cost table disagrees with its own sums");
+        if (choices > 1) solution.unique = false;
     }
     std::reverse(solution.ranking.begin(), solution.ranking.end());
+    for (candidate_index_t candidate = 0; candidate < num_candidates; ++candidate) {
+        arithmetic_t score = costs[(states - 1) ^ (std::size_t {1} << candidate)];
+        for (candidate_index_t other = 0; other < num_candidates; ++other)
+            if (other != candidate) score += arithmetic_t(preferences[other * num_candidates + candidate]);
+        if (score == solution.score) solution.winners.push_back(candidate);
+    }
     return solution;
 }
 
@@ -192,27 +211,27 @@ inline kemeny_solution<score_type_> kemeny_trace_(kemeny_sums<score_type_> const
  *  @param preferences The pairwise preference matrix.
  *  @param num_candidates The number of candidates, which the score table bounds to 33.
  */
-template <typename score_type_ = std::uint64_t>
-inline kemeny_solution<score_type_> compute_kemeny_ranking_cpu(votes_count_t const* preferences,
-                                                               candidate_index_t num_candidates) {
-    using score_t = score_type_;
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t, typename stored_count_type_>
+inline kemeny_solution<arithmetic_type_> compute_kemeny_ranking_cpu(stored_count_type_ const* preferences,
+                                                                    candidate_index_t num_candidates) {
+    using arithmetic_t = arithmetic_type_;
     kemeny_require_supported_width_(num_candidates);
-    kemeny_require_score_range_<score_t>(preferences, num_candidates);
+    kemeny_require_score_range_<arithmetic_t>(preferences, num_candidates);
 
-    kemeny_sums<score_t> const sums(preferences, num_candidates);
+    kemeny_sums<arithmetic_t> const sums(preferences, num_candidates);
     std::vector<std::uint32_t> const binomials = kemeny_binomials_(num_candidates);
     candidate_index_t const binomials_stride = num_candidates + 1;
     std::size_t const states = std::size_t {1} << num_candidates;
 
     // Entry `subset` is the least disagreement achievable seating those candidates in the
     // leading places, counting only the pairs inside it.
-    std::vector<score_t> costs;
+    std::vector<arithmetic_t> costs;
     try {
         costs.resize(states);
     }
     catch (std::bad_alloc const&) {
         throw std::runtime_error("Kemeny over " + std::to_string(num_candidates) + " candidates wants " +
-                                 std::to_string((states * sizeof(score_t)) >> 20) + " MiB of host memory");
+                                 std::to_string((states * sizeof(arithmetic_t)) >> 20) + " MiB of host memory");
     }
 
     for (candidate_index_t seated = 1; seated <= num_candidates; seated++) {
@@ -225,21 +244,21 @@ inline kemeny_solution<score_type_> compute_kemeny_ranking_cpu(votes_count_t con
             std::size_t subset = kemeny_unrank_colex_(binomials.data(), num_candidates, seated,
                                                       static_cast<std::uint64_t>(first_rank));
             for (std::int64_t rank = first_rank; rank < last_rank; rank++, subset = kemeny_next_colex_(subset)) {
-                score_t best = std::numeric_limits<score_t>::max();
+                arithmetic_t best = std::numeric_limits<arithmetic_t>::max();
                 for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
                     std::size_t const bit = std::size_t {1} << candidate;
                     if (!(subset & bit)) continue;
                     // Seating this candidate last within the subset costs the votes that preferred
                     // it to each of the others.
                     std::size_t const rest = subset ^ bit;
-                    best = std::min<score_t>(best, costs[rest] + sums.against(candidate, rest));
+                    best = std::min<arithmetic_t>(best, costs[rest] + sums.against(candidate, rest));
                 }
                 costs[subset] = best;
             }
         }
     }
 
-    return kemeny_trace_(sums, costs.data(), num_candidates);
+    return kemeny_trace_(sums, costs.data(), num_candidates, preferences);
 }
 
 #pragma endregion Kemeny
@@ -254,14 +273,14 @@ constexpr std::uint32_t kemeny_block_size_k = 256;
 /** Device memory the tables must leave behind for the driver and everyone else. */
 constexpr std::size_t kemeny_device_headroom_k = std::size_t {1} << 30;
 
-/** The split-mask tables of `kemeny_sums<score_type_>` as a kernel addresses them. */
-template <typename score_type_ = std::uint64_t>
+/** The split-mask tables of `kemeny_sums<arithmetic_type_>` as a kernel addresses them. */
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t>
 struct kemeny_device_sums {
-    using score_t = score_type_;
+    using arithmetic_t = arithmetic_type_;
     /** Votes against each candidate, indexed by the mask's low half. */
-    score_t const* low;
+    arithmetic_t const* low;
     /** Votes against each candidate, indexed by the mask's high half. */
-    score_t const* high;
+    arithmetic_t const* high;
     /** How many of the mask's low bits the low table covers. */
     candidate_index_t low_bits;
     /** The low table's per-candidate stride. */
@@ -270,16 +289,17 @@ struct kemeny_device_sums {
     std::uint32_t high_states;
 
     /** Votes that preferred @p candidate to every member of @p subset. */
-    __forceinline__ __device__ score_t against(candidate_index_t candidate, std::size_t subset) const noexcept {
+    __forceinline__ __device__ arithmetic_t against(candidate_index_t candidate, std::size_t subset) const noexcept {
         return low[candidate * low_states + (subset & (low_states - 1))] +
                high[candidate * high_states + (subset >> low_bits)];
     }
 };
 
 /** Scores seating one candidate last, keeping whichever of the two orderings costs less. */
-template <typename score_type_ = std::uint64_t>
-__forceinline__ __device__ score_type_ kemeny_relax_(score_type_ rest, score_type_ against, score_type_ best) noexcept {
-    score_type_ const score = rest + against;
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t>
+__forceinline__ __device__ arithmetic_type_ kemeny_relax_(arithmetic_type_ rest, arithmetic_type_ against,
+                                                          arithmetic_type_ best) noexcept {
+    arithmetic_type_ const score = rest + against;
     return score < best ? score : best;
 }
 
@@ -290,18 +310,18 @@ __forceinline__ __device__ score_type_ kemeny_relax_(score_type_ rest, score_typ
  *  many threads as it has subsets. Clearing a bit drops the population count by one, and that
  *  layer is complete before this one launches.
  */
-template <typename score_type_ = std::uint64_t>
-__global__ void kemeny_layer_gpu(                                     //
-    kemeny_device_sums<score_type_> sums, score_type_* costs,         //
-    std::uint32_t const* binomials, candidate_index_t num_candidates, //
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t>
+__global__ void kemeny_layer_gpu(                                       //
+    kemeny_device_sums<arithmetic_type_> sums, arithmetic_type_* costs, //
+    std::uint32_t const* binomials, candidate_index_t num_candidates,   //
     candidate_index_t seated, std::uint64_t layer_states) {
-    using score_t = score_type_;
+    using arithmetic_t = arithmetic_type_;
 
     std::uint64_t const rank = static_cast<std::uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (rank >= layer_states) return;
     std::size_t const subset = kemeny_unrank_colex_(binomials, num_candidates, seated, rank);
 
-    score_t best = ~score_t {0};
+    arithmetic_t best = std::numeric_limits<arithmetic_t>::max();
     for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
         std::size_t const bit = std::size_t {1} << candidate;
         if (!(subset & bit)) continue;
@@ -321,19 +341,19 @@ __global__ void kemeny_layer_gpu(                                     //
  *  @param preferences The pairwise preference matrix.
  *  @param num_candidates The number of candidates, which free device memory bounds further.
  */
-template <typename score_type_ = std::uint64_t>
-inline kemeny_solution<score_type_> compute_kemeny_ranking_gpu(votes_count_t const* preferences,
-                                                               candidate_index_t num_candidates) {
-    using score_t = score_type_;
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t, typename stored_count_type_>
+inline kemeny_solution<arithmetic_type_> compute_kemeny_ranking_gpu(stored_count_type_ const* preferences,
+                                                                    candidate_index_t num_candidates) {
+    using arithmetic_t = arithmetic_type_;
     kemeny_require_supported_width_(num_candidates);
-    kemeny_require_score_range_<score_t>(preferences, num_candidates);
+    kemeny_require_score_range_<arithmetic_t>(preferences, num_candidates);
 
-    kemeny_sums<score_t> const sums(preferences, num_candidates);
+    kemeny_sums<arithmetic_t> const sums(preferences, num_candidates);
     std::vector<std::uint32_t> const host_binomials = kemeny_binomials_(num_candidates);
     std::size_t const states = std::size_t {1} << num_candidates;
     std::size_t const sums_states = sums.low.size() + sums.high.size();
     candidate_index_t const binomials_stride = num_candidates + 1;
-    std::size_t const wanted_bytes = (states + sums_states) * sizeof(score_t) +
+    std::size_t const wanted_bytes = (states + sums_states) * sizeof(arithmetic_t) +
                                      host_binomials.size() * sizeof(std::uint32_t);
 
     // Managed memory oversubscribes rather than failing, so an unaffordable table is refused here.
@@ -346,15 +366,15 @@ inline kemeny_solution<score_type_> compute_kemeny_ranking_gpu(votes_count_t con
                                  std::to_string(wanted_bytes >> 20) + " MiB of device memory, of which " +
                                  std::to_string(free_bytes >> 20) + " MiB is free");
 
-    managed_vector<score_t> costs(states);
-    managed_vector<score_t> device_sums(sums_states);
+    managed_vector<arithmetic_t> costs(states);
+    managed_vector<arithmetic_t> device_sums(sums_states);
     managed_vector<std::uint32_t> binomials(host_binomials.size());
 
     std::copy(sums.low.begin(), sums.low.end(), device_sums.data());
     std::copy(sums.high.begin(), sums.high.end(), device_sums.data() + sums.low.size());
     std::copy(host_binomials.begin(), host_binomials.end(), binomials.data());
 
-    kemeny_device_sums<score_t> const device_view {
+    kemeny_device_sums<arithmetic_t> const device_view {
         device_sums.data(),
         device_sums.data() + sums.low.size(),
         sums.low_bits,
@@ -363,7 +383,7 @@ inline kemeny_solution<score_type_> compute_kemeny_ranking_gpu(votes_count_t con
     };
 
     // Zeroes the empty subset the first layer reads, and faults the table's pages onto the device.
-    if (cudaMemset(costs.data(), 0, states * sizeof(score_t)) != cudaSuccess)
+    if (cudaMemset(costs.data(), 0, states * sizeof(arithmetic_t)) != cudaSuccess)
         throw std::runtime_error("Failed to clear device memory");
 
     for (candidate_index_t seated = 1; seated <= num_candidates; seated++) {
@@ -379,7 +399,7 @@ inline kemeny_solution<score_type_> compute_kemeny_ranking_gpu(votes_count_t con
     if (cudaDeviceSynchronize() != cudaSuccess)
         throw std::runtime_error("CUDA operations did not complete successfully");
 
-    return kemeny_trace_(sums, costs.data(), num_candidates);
+    return kemeny_trace_(sums, costs.data(), num_candidates, preferences);
 }
 
 #endif // defined(SCALING_ELECTIONS_WITH_CUDA)
@@ -389,35 +409,40 @@ inline kemeny_solution<score_type_> compute_kemeny_ranking_gpu(votes_count_t con
 #pragma region Dispatch
 
 /** Runs exact ranking with the chosen arithmetic type on the requested device. */
-template <typename score_type_ = std::uint64_t>
-inline kemeny_solution<score_type_> compute_kemeny_ranking(votes_count_t const* preferences,
-                                                           candidate_index_t num_candidates,
-                                                           backend_t backend = backend_t::cpu_k) {
-    using score_t = score_type_;
+template <typename arithmetic_type_ = default_kemeny_arithmetic_t, typename stored_count_type_>
+inline kemeny_solution<arithmetic_type_> compute_kemeny_ranking_typed(stored_count_type_ const* preferences,
+                                                                      candidate_index_t num_candidates,
+                                                                      backend_t backend = backend_t::cpu_k) {
+    using arithmetic_t = arithmetic_type_;
     kemeny_require_supported_width_(num_candidates);
-    if (backend == backend_t::cpu_k) return compute_kemeny_ranking_cpu<score_t>(preferences, num_candidates);
+    if (backend == backend_t::cpu_k) return compute_kemeny_ranking_cpu<arithmetic_t>(preferences, num_candidates);
 #if defined(SCALING_ELECTIONS_WITH_CUDA)
-    return compute_kemeny_ranking_gpu<score_t>(preferences, num_candidates);
+    return compute_kemeny_ranking_gpu<arithmetic_t>(preferences, num_candidates);
 #else
     throw std::runtime_error("This build has no GPU support compiled in");
 #endif
 }
 
-inline kemeny_solution<> compute_kemeny_ranking(votes_count_t const* preferences, candidate_index_t num_candidates,
+template <typename stored_count_type_>
+inline kemeny_solution<> compute_kemeny_ranking(stored_count_type_ const* preferences, candidate_index_t num_candidates,
                                                 backend_t backend = backend_t::cpu_k,
                                                 score_type_t score_type = score_type_t::auto_k) {
-    if (score_type == score_type_t::auto_k)
-        score_type = kemeny_score_bound_(preferences, num_candidates) < std::numeric_limits<std::uint32_t>::max()
-                         ? score_type_t::uint32_k
-                         : score_type_t::uint64_k;
+    if (score_type == score_type_t::auto_k) {
+        auto const bound = kemeny_score_bound_(preferences, num_candidates);
+        score_type = bound < std::numeric_limits<std::uint32_t>::max()   ? score_type_t::uint32_k
+                     : bound < std::numeric_limits<std::uint64_t>::max() ? score_type_t::uint64_k
+                                                                         : score_type_t::saturated64_k;
+    }
     auto run = [&](auto score) {
-        auto solution = compute_kemeny_ranking<decltype(score)>(preferences, num_candidates, backend);
-        return kemeny_solution<> {std::move(solution.ranking), solution.score};
+        auto solution = compute_kemeny_ranking_typed<decltype(score)>(preferences, num_candidates, backend);
+        return kemeny_solution<> {std::move(solution.ranking), static_cast<std::uint64_t>(solution.score),
+                                  std::move(solution.winners), solution.unique};
     };
     switch (score_type) {
     case score_type_t::uint16_k: return run(std::uint16_t {});
     case score_type_t::uint32_k: return run(std::uint32_t {});
     case score_type_t::uint64_k: return run(std::uint64_t {});
+    case score_type_t::saturated64_k: return run(saturated<std::uint64_t> {0});
     default: throw std::invalid_argument("Invalid score type");
     }
 }

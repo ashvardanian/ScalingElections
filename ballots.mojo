@@ -1,13 +1,8 @@
 """
 Ballot storage shared by the Schulze and Kemeny-Young solvers.
 
-Both stages pass around one square `UInt32` matrix. Read as preferences, entry `(row, column)`
-counts the voters ranking the row's candidate above the column's; read as strongest paths, it
-holds the widest bottleneck between them. The two meanings share a layout, an allocation and an
-accessor, so `VoteMatrix` is the storage and the aliases below name the reading.
-
-`winning_votes_graph` turns the first into the seed of the second, keeping only the winning side
-of each pairwise contest, which is where every Schulze backend starts.
+Entries count voters preferring the row candidate to the column candidate.
+The same generic storage holds strongest path capacities after solving Schulze.
 """
 
 from std.atomic import Atomic
@@ -45,56 +40,125 @@ struct Backend(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegister
 
 @fieldwise_init
 struct ScoreType(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegisterPassable):
-    var bits: Int
+    var value: UInt8
 
     def __eq__(self, other: Self) -> Bool:
-        return self.bits == other.bits
+        return self.value == other.value
 
     def __ne__(self, other: Self) -> Bool:
-        return self.bits != other.bits
+        return self.value != other.value
 
     comptime auto = Self(0)
     comptime uint16 = Self(16)
     comptime uint32 = Self(32)
     comptime uint64 = Self(64)
+    comptime saturated64 = Self(65)
+
+    def width(self) -> Int:
+        return 64 if self == Self.saturated64 else Int(self.value)
+
+    @staticmethod
+    def parse(value: String) raises -> Self:
+        if value == "auto":
+            return Self.auto
+        if value == "uint16":
+            return Self.uint16
+        if value == "uint32":
+            return Self.uint32
+        if value == "uint64":
+            return Self.uint64
+        if value == "saturated64":
+            return Self.saturated64
+        raise Error("score_type must be auto, uint16, uint32, uint64, or saturated64")
+
+
+@fieldwise_init
+struct Arithmetic(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegisterPassable):
+    var value: UInt8
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.value == other.value
+
+    def __ne__(self, other: Self) -> Bool:
+        return self.value != other.value
+
+    comptime exact = Self(0)
+    comptime saturated = Self(1)
+
+
+@fieldwise_init
+struct Unranked(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegisterPassable):
+    var value: UInt8
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.value == other.value
+
+    def __ne__(self, other: Self) -> Bool:
+        return self.value != other.value
+
+    comptime unknown = Self(0)
+    comptime worse = Self(1)
+
+
+@fieldwise_init
+struct Saturated[dtype: DType](Copyable, Movable):
+    """An unsigned counter whose maximum is the saturation sentinel."""
+
+    comptime count_t = SIMD[Self.dtype, 1]
+
+    var value: Self.count_t
+
+    @always_inline
+    def __add__(self, other: Self) -> Self:
+        return Self(min(self.value, Self.count_t.MAX - other.value) + other.value)
+
+
+@always_inline
+def add_counts[arithmetic: Arithmetic, dtype: DType](left: SIMD[dtype, 1], right: SIMD[dtype, 1]) -> SIMD[dtype, 1]:
+    comptime if arithmetic == Arithmetic.saturated:
+        return (Saturated[dtype](left) + Saturated[dtype](right)).value
+    else:
+        return left + right
 
 
 # region Matrix
 
 
 @fieldwise_init
-struct VoteMatrix[score_dtype: DType = DType.uint32](Movable):
+struct VoteMatrix[stored_count_dtype: DType = DType.uint32](Movable):
     """Dense square matrix of pairwise vote counts, indexed by a pair of candidates."""
 
-    var data: Pointer[SIMD[Self.score_dtype, 1], MutUntrackedOrigin]
+    comptime stored_count_t = SIMD[Self.stored_count_dtype, 1]
+
+    var data: Pointer[Self.stored_count_t, MutUntrackedOrigin]
     var num_candidates: Int
 
-    def __init__(out self, num_candidates: Int):
+    def __init__(out self, num_candidates: Int) raises:
+        if num_candidates < 0 or (num_candidates != 0 and num_candidates > Int.MAX // num_candidates // 8):
+            raise Error("Matrix size exceeds the addressable range")
         self.num_candidates = num_candidates
         var size = num_candidates * num_candidates
-        self.data = alloc(Layout[SIMD[Self.score_dtype, 1]](count=size)).unsafe_leak()
+        self.data = alloc(Layout[Self.stored_count_t](count=size)).unsafe_leak()
         unsafe_memset_zero(self.data, size)
 
-    def __getitem__(self, row: Int, column: Int) -> SIMD[Self.score_dtype, 1]:
+    def __getitem__(self, row: Int, column: Int) -> Self.stored_count_t:
         return self.data[unsafe_offset=row * self.num_candidates + column]
 
-    def __setitem__(mut self, row: Int, column: Int, value: SIMD[Self.score_dtype, 1]):
+    def __setitem__(mut self, row: Int, column: Int, value: Self.stored_count_t):
         self.data[unsafe_offset=row * self.num_candidates + column] = value
 
     def __deinit__(deinit self):
         self.data.unsafe_free()
 
 
-comptime PreferenceMatrix = VoteMatrix[DType.uint32]
-"""The two names read differently at a call site and denote the same storage."""
-comptime StrongestPathsMatrix = VoteMatrix[DType.uint32]
+comptime UInt32VoteMatrix = VoteMatrix[DType.uint32]
 
 # endregion Matrix
 
 # region Preferences
 
 
-def populate_preferences_from_ranking(mut preferences: PreferenceMatrix, ranking: List[Int]):
+def populate_preferences_from_ranking(mut preferences: UInt32VoteMatrix, ranking: List[Int]):
     """
     Populates the preference matrix based on a ranking of candidates.
 
@@ -111,7 +175,7 @@ def populate_preferences_from_ranking(mut preferences: PreferenceMatrix, ranking
             preferences[preferred, opponent] = current_count + 1
 
 
-def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value: Int) -> PreferenceMatrix:
+def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value: Int) raises -> UInt32VoteMatrix:
     """
     Draws a preference matrix for a synthetic election of the requested shape.
 
@@ -123,7 +187,7 @@ def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value
     Returns:
         Random preference matrix.
     """
-    var preferences = PreferenceMatrix(num_candidates)
+    var preferences = UInt32VoteMatrix(num_candidates)
 
     if num_voters == 0:
 
@@ -172,8 +236,12 @@ def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value
 
 
 def winning_votes_graph[
-    score_dtype: DType
-](preferences: PreferenceMatrix, graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], row_stride: Int,):
+    arithmetic_dtype: DType, stored_count_dtype: DType
+](
+    preferences: VoteMatrix[stored_count_dtype],
+    graph: Pointer[SIMD[arithmetic_dtype, 1], MutUntrackedOrigin],
+    row_stride: Int,
+):
     """
     Seeds a strongest-paths graph with the winning side of each pairwise contest.
 
@@ -195,7 +263,7 @@ def winning_votes_graph[
                 var forward = preferences[row, column]
                 var backward = preferences[column, row]
                 if forward > backward:
-                    graph[unsafe_offset=row * row_stride + column] = forward.cast[score_dtype]()
+                    graph[unsafe_offset=row * row_stride + column] = forward.cast[arithmetic_dtype]()
                 else:
                     graph[unsafe_offset=row * row_stride + column] = 0
 
@@ -221,8 +289,12 @@ struct SeedGraph(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegist
 
 
 def positive_margins_graph[
-    score_dtype: DType
-](preferences: PreferenceMatrix, graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin], row_stride: Int,):
+    arithmetic_dtype: DType, stored_count_dtype: DType
+](
+    preferences: VoteMatrix[stored_count_dtype],
+    graph: Pointer[SIMD[arithmetic_dtype, 1], MutUntrackedOrigin],
+    row_stride: Int,
+):
     """
     Seeds a strongest-paths graph with each pair's positive margin.
 
@@ -237,17 +309,17 @@ def positive_margins_graph[
         for column in range(num_candidates):
             var forward = preferences[row, column]
             var backward = preferences[column, row]
-            var margin = forward - backward if row != column and forward > backward else UInt32(0)
-            graph[unsafe_offset=row * row_stride + column] = margin.cast[score_dtype]()
+            var margin = forward - backward if row != column and forward > backward else SIMD[stored_count_dtype, 1](0)
+            graph[unsafe_offset=row * row_stride + column] = margin.cast[arithmetic_dtype]()
 
     parallelize(fill_row, num_candidates)
 
 
 def seed_graph[
-    score_dtype: DType
+    arithmetic_dtype: DType, stored_count_dtype: DType
 ](
-    preferences: PreferenceMatrix,
-    graph: Pointer[SIMD[score_dtype, 1], MutUntrackedOrigin],
+    preferences: VoteMatrix[stored_count_dtype],
+    graph: Pointer[SIMD[arithmetic_dtype, 1], MutUntrackedOrigin],
     row_stride: Int,
     which: SeedGraph,
 ):
@@ -261,9 +333,9 @@ def seed_graph[
 # endregion Graph
 
 
-def tally_ballots_cpu(rankings: List[UInt32], num_ballots: Int, num_candidates: Int) -> PreferenceMatrix:
+def tally_ballots_cpu(rankings: List[UInt32], num_ballots: Int, num_candidates: Int) raises -> UInt32VoteMatrix:
     """Counts complete rankings in parallel with one private matrix per worker."""
-    var preferences = PreferenceMatrix(num_candidates)
+    var preferences = UInt32VoteMatrix(num_candidates)
     if num_ballots == 0:
         return preferences^
     var workers = min(num_ballots, num_logical_cores())
@@ -348,7 +420,7 @@ def gpu_tally_kernel[
         cell += threads
 
 
-def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: Int) raises -> PreferenceMatrix:
+def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: Int) raises -> UInt32VoteMatrix:
     """
     Counts complete rankings into a pairwise matrix, one private matrix per block.
 
@@ -363,7 +435,7 @@ def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
     if num_candidates > TALLY_MAX_CANDIDATES:
         raise Error("The GPU tally holds at most " + String(TALLY_MAX_CANDIDATES) + " candidates")
 
-    var preferences = PreferenceMatrix(num_candidates)
+    var preferences = UInt32VoteMatrix(num_candidates)
     if num_ballots == 0:
         return preferences^
     var cells = num_candidates * num_candidates
@@ -376,9 +448,8 @@ def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
     var device_counts = ctx.enqueue_create_buffer[DType.uint32](cells)
     ctx.synchronize()
 
-    var rankings_ptr = host_rankings.unsafe_ptr()
     for index in range(total):
-        rankings_ptr[unsafe_offset=index] = rankings[index]
+        host_rankings[index] = rankings[index]
     unsafe_memset_zero(host_counts.unsafe_ptr(), cells)
 
     host_rankings.enqueue_copy_to(device_rankings)
@@ -397,10 +468,9 @@ def tally_ballots_gpu(rankings: List[UInt32], num_ballots: Int, num_candidates: 
     device_counts.enqueue_copy_to(host_counts)
     ctx.synchronize()
 
-    var counts_ptr = host_counts.unsafe_ptr()
+    var counts = host_counts.as_span()
     for cell in range(cells):
-        preferences.data[unsafe_offset=cell] = counts_ptr[unsafe_offset=cell]
-    deinit(host_counts^)
+        preferences.data[unsafe_offset=cell] = counts[cell]
     return preferences^
 
 
@@ -410,8 +480,256 @@ def tally_ballots(
     num_candidates: Int,
     *,
     backend: Backend = Backend.cpu,
-) raises -> PreferenceMatrix:
+) raises -> UInt32VoteMatrix:
     """Counts complete rankings using the selected device's default kernel."""
     return tally_ballots_gpu(rankings, num_ballots, num_candidates) if backend == Backend.gpu else tally_ballots_cpu(
         rankings, num_ballots, num_candidates
+    )
+
+
+@always_inline
+def tally_ragged_row[
+    arithmetic_dtype: DType, arithmetic: Arithmetic
+](
+    rankings: Pointer[UInt32, ImmUntrackedOrigin],
+    offsets: Pointer[UInt64, ImmUntrackedOrigin],
+    ranks: Pointer[UInt32, ImmUntrackedOrigin],
+    weights: Pointer[UInt64, ImmUntrackedOrigin],
+    counts: Pointer[SIMD[arithmetic_dtype, 1], MutUntrackedOrigin],
+    candidate: Int,
+    num_candidates: Int,
+    first: Int,
+    last: Int,
+    unranked: Unranked,
+):
+    for ballot in range(first, last):
+        var begin = Int(offsets[unsafe_offset=ballot])
+        var end = Int(offsets[unsafe_offset=ballot + 1])
+        var position = begin
+        while position < end and Int(rankings[unsafe_offset=position]) != candidate:
+            position += 1
+        if position == end:
+            continue
+        var weight = weights[unsafe_offset=ballot].cast[arithmetic_dtype]()
+        var rank = ranks[unsafe_offset=position]
+        for other in range(begin, end):
+            if rank < ranks[unsafe_offset=other]:
+                var opponent = Int(rankings[unsafe_offset=other])
+                counts[unsafe_offset=opponent] = add_counts[arithmetic](counts[unsafe_offset=opponent], weight)
+        if unranked == Unranked.worse:
+            for opponent in range(num_candidates):
+                var other = begin
+                while other < end and Int(rankings[unsafe_offset=other]) != opponent:
+                    other += 1
+                if other == end:
+                    counts[unsafe_offset=opponent] = add_counts[arithmetic](counts[unsafe_offset=opponent], weight)
+
+
+def tally_ragged_gpu[
+    arithmetic_dtype: DType, arithmetic: Arithmetic
+](
+    rankings: Pointer[UInt32, MutUntrackedOrigin],
+    offsets: Pointer[UInt64, MutUntrackedOrigin],
+    ranks: Pointer[UInt32, MutUntrackedOrigin],
+    weights: Pointer[UInt64, MutUntrackedOrigin],
+    counts: Pointer[SIMD[arithmetic_dtype, 1], MutUntrackedOrigin],
+    num_candidates_arg: Int64,
+    num_ballots_arg: Int64,
+    chunks_arg: Int64,
+    unranked_value: UInt8,
+):
+    var num_candidates = Int(num_candidates_arg)
+    var num_ballots = Int(num_ballots_arg)
+    var chunks = Int(chunks_arg)
+    var task = Int(block_idx.x) * Int(block_dim.x) + Int(thread_idx.x)
+    if task >= chunks * num_candidates:
+        return
+    var chunk = task // num_candidates
+    var candidate = task % num_candidates
+    tally_ragged_row[arithmetic_dtype, arithmetic](
+        rankings,
+        offsets,
+        ranks,
+        weights,
+        counts.unsafe_offset(task * num_candidates),
+        candidate,
+        num_candidates,
+        num_ballots * chunk // chunks,
+        num_ballots * (chunk + 1) // chunks,
+        Unranked(unranked_value),
+    )
+
+
+def reduce_tally_gpu[
+    arithmetic_dtype: DType, arithmetic: Arithmetic
+](
+    counts: Pointer[SIMD[arithmetic_dtype, 1], MutUntrackedOrigin],
+    result: Pointer[SIMD[arithmetic_dtype, 1], MutUntrackedOrigin],
+    cells_arg: Int64,
+    chunks_arg: Int64,
+):
+    var cells = Int(cells_arg)
+    var chunks = Int(chunks_arg)
+    var cell = Int(block_idx.x) * Int(block_dim.x) + Int(thread_idx.x)
+    if cell >= cells:
+        return
+    var total = SIMD[arithmetic_dtype, 1](0)
+    for chunk in range(chunks):
+        total = add_counts[arithmetic](total, counts[unsafe_offset=chunk * cells + cell])
+    result[unsafe_offset=cell] = total
+
+
+def tally_ragged_typed[
+    arithmetic_dtype: DType, arithmetic: Arithmetic
+](
+    rankings: List[UInt32],
+    offsets: List[UInt64],
+    ranks: List[UInt32],
+    weights: List[UInt64],
+    num_candidates: Int,
+    unranked: Unranked,
+    backend: Backend,
+) raises -> VoteMatrix[DType.uint64]:
+    var result = VoteMatrix[DType.uint64](num_candidates)
+    var num_ballots = len(weights)
+    if num_ballots == 0:
+        return result^
+    var cells = num_candidates * num_candidates
+    if backend == Backend.cpu:
+        var counts = List[SIMD[arithmetic_dtype, 1]]()
+        counts.resize(cells, 0)
+        var counts_ptr = counts.unsafe_ptr()
+
+        def count_row(candidate: Int) {imm}:
+            tally_ragged_row[arithmetic_dtype, arithmetic](
+                rankings.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
+                offsets.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
+                ranks.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
+                weights.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](),
+                counts_ptr.unsafe_offset(candidate * num_candidates).unsafe_origin_cast[MutUntrackedOrigin](),
+                candidate,
+                num_candidates,
+                0,
+                num_ballots,
+                unranked,
+            )
+
+        parallelize(count_row, num_candidates)
+        for cell in range(cells):
+            result.data[unsafe_offset=cell] = UInt64(counts[cell])
+    else:
+        # Private rows avoid unsupported 64-bit atomics on Metal.
+        var chunks = min(num_ballots, max(1, min(4096 // num_candidates, (64 * 1024 * 1024) // (cells * 8))))
+        var ctx = DeviceContext()
+        var host_rankings = ctx.enqueue_create_host_buffer[DType.uint32](max(1, len(rankings)))
+        var host_offsets = ctx.enqueue_create_host_buffer[DType.uint64](len(offsets))
+        var host_ranks = ctx.enqueue_create_host_buffer[DType.uint32](max(1, len(ranks)))
+        var host_weights = ctx.enqueue_create_host_buffer[DType.uint64](num_ballots)
+        var device_rankings = ctx.enqueue_create_buffer[DType.uint32](max(1, len(rankings)))
+        var device_offsets = ctx.enqueue_create_buffer[DType.uint64](len(offsets))
+        var device_ranks = ctx.enqueue_create_buffer[DType.uint32](max(1, len(ranks)))
+        var device_weights = ctx.enqueue_create_buffer[DType.uint64](num_ballots)
+        var counts = ctx.enqueue_create_buffer[arithmetic_dtype](chunks * cells)
+        var device_result = ctx.enqueue_create_buffer[arithmetic_dtype](cells)
+        var host_result = ctx.enqueue_create_host_buffer[arithmetic_dtype](cells)
+        ctx.synchronize()
+        for entry in range(len(rankings)):
+            host_rankings[entry] = rankings[entry]
+            host_ranks[entry] = ranks[entry]
+        for ballot in range(num_ballots):
+            host_weights[ballot] = weights[ballot]
+        for offset in range(len(offsets)):
+            host_offsets[offset] = offsets[offset]
+        host_rankings.enqueue_copy_to(device_rankings)
+        host_offsets.enqueue_copy_to(device_offsets)
+        host_ranks.enqueue_copy_to(device_ranks)
+        host_weights.enqueue_copy_to(device_weights)
+        counts.enqueue_fill(0)
+        ctx.enqueue_function[tally_ragged_gpu[arithmetic_dtype, arithmetic]](
+            device_rankings.unsafe_ptr(),
+            device_offsets.unsafe_ptr(),
+            device_ranks.unsafe_ptr(),
+            device_weights.unsafe_ptr(),
+            counts.unsafe_ptr(),
+            Int64(num_candidates),
+            Int64(num_ballots),
+            Int64(chunks),
+            unranked.value,
+            grid_dim=((chunks * num_candidates + 255) // 256, 1, 1),
+            block_dim=(256, 1, 1),
+        )
+        ctx.enqueue_function[reduce_tally_gpu[arithmetic_dtype, arithmetic]](
+            counts.unsafe_ptr(),
+            device_result.unsafe_ptr(),
+            Int64(cells),
+            Int64(chunks),
+            grid_dim=((cells + 255) // 256, 1, 1),
+            block_dim=(256, 1, 1),
+        )
+        device_result.enqueue_copy_to(host_result)
+        ctx.synchronize()
+        for cell in range(cells):
+            result.data[unsafe_offset=cell] = UInt64(host_result[cell])
+    return result^
+
+
+def resolve_tally_score_type(bound: UInt64, requested: ScoreType) raises -> ScoreType:
+    if requested == ScoreType.auto:
+        if bound <= UInt64(UInt32.MAX):
+            return ScoreType.uint32
+        return ScoreType.saturated64 if bound == UInt64.MAX else ScoreType.uint64
+    if (
+        (requested == ScoreType.uint16 and bound > UInt64(UInt16.MAX))
+        or (requested == ScoreType.uint32 and bound > UInt64(UInt32.MAX))
+        or (requested == ScoreType.uint64 and bound == UInt64.MAX)
+    ):
+        raise Error("Tally bound exceeds the selected arithmetic type")
+    return requested
+
+
+def tally_ragged_ballots(
+    rankings: List[UInt32],
+    offsets: List[UInt64],
+    ranks: List[UInt32],
+    weights: List[UInt64],
+    num_candidates: Int,
+    *,
+    unranked: Unranked = Unranked.unknown,
+    backend: Backend = Backend.cpu,
+    score_type: ScoreType = ScoreType.auto,
+) raises -> VoteMatrix[DType.uint64]:
+    """Tallies weighted CSR ballots; UInt64.MAX cells report unrepresentable counts."""
+    if num_candidates < 1 or num_candidates > Int.MAX // num_candidates // 8:
+        raise Error("Invalid candidate count or matrix size")
+    if len(offsets) != len(weights) + 1 or len(offsets) == 0:
+        raise Error("Offsets must have one more entry than weights")
+    if offsets[0] != 0 or offsets[len(offsets) - 1] != UInt64(len(rankings)) or len(ranks) != len(rankings):
+        raise Error("Offsets and ranks must cover all entries")
+    var seen = List[Int]()
+    seen.resize(num_candidates, -1)
+    var bound = UInt64(0)
+    for ballot in range(len(weights)):
+        if offsets[ballot] > offsets[ballot + 1] or offsets[ballot + 1] > UInt64(len(rankings)):
+            raise Error("Offsets must be monotone and within the rankings")
+        bound = add_counts[Arithmetic.saturated](bound, weights[ballot])
+        for position in range(Int(offsets[ballot]), Int(offsets[ballot + 1])):
+            var candidate = Int(rankings[position])
+            if candidate >= num_candidates or seen[candidate] == ballot:
+                raise Error("Candidate IDs must be in range and unique within each ballot")
+            seen[candidate] = ballot
+    var resolved = resolve_tally_score_type(bound, score_type)
+    if resolved == ScoreType.uint16:
+        return tally_ragged_typed[DType.uint16, Arithmetic.exact](
+            rankings, offsets, ranks, weights, num_candidates, unranked, backend
+        )
+    if resolved == ScoreType.uint32:
+        return tally_ragged_typed[DType.uint32, Arithmetic.exact](
+            rankings, offsets, ranks, weights, num_candidates, unranked, backend
+        )
+    if resolved == ScoreType.saturated64 or bound == UInt64.MAX:
+        return tally_ragged_typed[DType.uint64, Arithmetic.saturated](
+            rankings, offsets, ranks, weights, num_candidates, unranked, backend
+        )
+    return tally_ragged_typed[DType.uint64, Arithmetic.exact](
+        rankings, offsets, ranks, weights, num_candidates, unranked, backend
     )

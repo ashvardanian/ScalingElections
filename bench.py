@@ -67,7 +67,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--score-bits", choices=("auto", "16", "32", "64"))
+    parser.add_argument("--score-bits", choices=tuple(scalingelections.ScoreType))
     args = parser.parse_args()
     n, voters = args.num_candidates, args.num_voters
     if n < 1 or voters < 0 or args.warmup < 0 or args.repeat < 1:
@@ -110,9 +110,7 @@ def main():
     }[args.method]
     options = {}
     if args.method in ("schulze", "kemeny"):
-        options["score_type"] = scalingelections.ScoreType(
-            "auto" if args.score_bits in (None, "auto") else f"uint{args.score_bits}"
-        )
+        options["score_type"] = scalingelections.ScoreType(args.score_bits or "auto")
         resolve_score_type = {
             "schulze": schulze.resolve_score_type,
             "kemeny": kemeny.resolve_score_type,
@@ -133,17 +131,13 @@ def main():
         elif args.method == "schulze":
             print("  rate", n**3 * 1e9 / average, "cells/s")
         else:
-            ranking, score = result
+            ranking, score, winners, unique = result
             if sorted(ranking) != list(range(n)) or score != sum(
                 int(inputs[ranking[later], ranking[earlier]]) for earlier in range(n) for later in range(earlier + 1, n)
             ):
                 raise RuntimeError("Kemeny ranking disagrees with its score")
         if baseline is not None:
-            matches = (
-                result[1] == baseline[1] and np.array_equal(result[0], baseline[0])
-                if args.method == "kemeny"
-                else np.array_equal(result, baseline)
-            )
+            matches = result == baseline if args.method == "kemeny" else np.array_equal(result, baseline)
             if not matches:
                 raise RuntimeError("Backend results disagree")
             print("  ✓ Results match")
@@ -152,10 +146,11 @@ def main():
 
     assert baseline is not None
     if args.method == "schulze":
-        winner, ranking = schulze.compute_election_results(list(range(n)), baseline)
-        print("Winner:", winner, "Top candidates:", ranking[:5])
+        winners, ranking = schulze.compute_election_results(list(range(n)), baseline)
+        print("Winners:", winners, "Top candidates:", ranking[:5])
     elif args.method == "kemeny":
-        print("Score:", baseline[1], "Ranking:", baseline[0])
+        print("Score:", baseline.score, "Ranking:", baseline.ranking)
+        print("Winners:", baseline.winners, "Unique:", baseline.unique)
 
 
 if __name__ == "__main__":

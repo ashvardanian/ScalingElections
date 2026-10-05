@@ -17,16 +17,17 @@
  *  A cell keeps its vote count only where it strictly beats the opposite direction, so ties, losses,
  *  and the diagonal all read as zero, the identity of the max-min semiring.
  */
-template <typename score_type_>
-inline void winning_votes_graph(const_matrix_t preferences, strided_matrix<score_type_> graph) {
+template <typename stored_count_type_, typename arithmetic_type_>
+inline void winning_votes_graph(strided_matrix<stored_count_type_ const> preferences,
+                                strided_matrix<arithmetic_type_> graph) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
 #pragma omp parallel for collapse(2)
     for (candidate_index_t row = 0; row < num_candidates; row++)
         for (candidate_index_t column = 0; column < num_candidates; column++)
             graph(row, column) = row != column && preferences(row, column) > preferences(column, row)
-                                     ? preferences(row, column)
-                                     : 0;
+                                     ? static_cast<arithmetic_type_>(preferences(row, column))
+                                     : arithmetic_type_ {0};
 }
 
 /** Which graph the strongest-paths sweep closes over. */
@@ -46,22 +47,25 @@ enum class seed_graph_t : std::uint8_t {
  *  A cell keeps its margin only where the pair is won, so at most one direction of any pair is
  *  ever non-zero. That is what lets the unchanged max-min kernel close over margins.
  */
-template <typename score_type_>
-inline void positive_margins_graph(const_matrix_t preferences, strided_matrix<score_type_> graph) {
+template <typename stored_count_type_, typename arithmetic_type_>
+inline void positive_margins_graph(strided_matrix<stored_count_type_ const> preferences,
+                                   strided_matrix<arithmetic_type_> graph) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
 #pragma omp parallel for collapse(2)
     for (candidate_index_t row = 0; row < num_candidates; row++)
         for (candidate_index_t column = 0; column < num_candidates; column++) {
-            votes_count_t const forward = preferences(row, column);
-            votes_count_t const backward = preferences(column, row);
-            graph(row, column) = row != column && forward > backward ? forward - backward : 0;
+            stored_count_type_ const forward = preferences(row, column);
+            stored_count_type_ const backward = preferences(column, row);
+            graph(row, column) = row != column && forward > backward ? static_cast<arithmetic_type_>(forward - backward)
+                                                                     : 0;
         }
 }
 
 /** Seeds the matrix with whichever graph the method is defined on. */
-template <typename score_type_>
-inline void seed_graph(const_matrix_t preferences, strided_matrix<score_type_> graph, seed_graph_t which) {
+template <typename stored_count_type_, typename arithmetic_type_>
+inline void seed_graph(strided_matrix<stored_count_type_ const> preferences, strided_matrix<arithmetic_type_> graph,
+                       seed_graph_t which) {
     if (which == seed_graph_t::positive_margins_k) positive_margins_graph(preferences, graph);
     else winning_votes_graph(preferences, graph);
 }
@@ -77,9 +81,9 @@ inline void seed_graph(const_matrix_t preferences, strided_matrix<score_type_> g
  *  and exceeds the widest path running back the other way. The set is irresolute by Theorem 4.7,
  *  so it can name several winners where Schulze names one.
  */
-template <typename score_type_>
-inline std::vector<candidate_index_t> select_split_cycle_winners(const_matrix_t preferences,
-                                                                 strided_matrix<score_type_> margin_paths) {
+template <typename stored_count_type_, typename arithmetic_type_>
+inline std::vector<candidate_index_t> select_split_cycle_winners(strided_matrix<stored_count_type_ const> preferences,
+                                                                 strided_matrix<arithmetic_type_> margin_paths) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
     std::vector<candidate_index_t> undefeated;
@@ -87,8 +91,8 @@ inline std::vector<candidate_index_t> select_split_cycle_winners(const_matrix_t 
         bool defeated = false;
         for (candidate_index_t rival = 0; rival < num_candidates && !defeated; rival++) {
             if (rival == candidate) continue;
-            votes_count_t const forward = preferences(rival, candidate);
-            votes_count_t const backward = preferences(candidate, rival);
+            stored_count_type_ const forward = preferences(rival, candidate);
+            stored_count_type_ const backward = preferences(candidate, rival);
             if (forward <= backward) continue;
             defeated = (forward - backward) > margin_paths(candidate, rival);
         }
@@ -108,27 +112,27 @@ inline std::vector<candidate_index_t> select_split_cycle_winners(const_matrix_t 
  *  Accumulating rather than assigning is what lets an electorate arrive in chunks instead of
  *  having to sit in memory all at once.
  */
-inline void tally_ballots_cpu(ballots_t rankings, matrix_t preferences) {
+inline void tally_ballots_cpu(ballots_t rankings, uint32_matrix_t preferences) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
     std::size_t const num_ballots = rankings.extent(0);
     std::size_t const cells = static_cast<std::size_t>(num_candidates) * num_candidates;
 #pragma omp parallel
     {
-        std::vector<votes_count_t> private_counts(cells, 0);
+        std::vector<std::uint32_t> private_counts(cells, 0);
 #pragma omp for schedule(static)
         for (std::ptrdiff_t ballot = 0; ballot < static_cast<std::ptrdiff_t>(num_ballots); ballot++) {
             candidate_index_t const* const ranking = &rankings(ballot, 0);
             for (candidate_index_t position = 0; position + 1 < num_candidates; position++) {
                 candidate_index_t const preferred = ranking[position];
                 for (candidate_index_t later = position + 1; later < num_candidates; later++)
-                    private_counts[preferred * num_candidates + ranking[later]]++;
+                    private_counts[std::size_t(preferred) * num_candidates + ranking[later]]++;
             }
         }
 #pragma omp critical
         for (candidate_index_t row = 0; row < num_candidates; row++)
             for (candidate_index_t column = 0; column < num_candidates; column++)
-                preferences(row, column) += private_counts[row * num_candidates + column];
+                preferences(row, column) += private_counts[std::size_t(row) * num_candidates + column];
     }
 }
 
@@ -141,7 +145,7 @@ constexpr std::uint32_t tally_block_size_k = 256;
 inline std::size_t tally_shared_bytes(candidate_index_t num_candidates) noexcept {
     std::size_t const cells = static_cast<std::size_t>(num_candidates) * num_candidates;
     std::size_t const staged = static_cast<std::size_t>(tally_block_size_k / warp_size_k) * num_candidates;
-    return cells * sizeof(votes_count_t) + staged * sizeof(candidate_index_t);
+    return cells * sizeof(std::uint32_t) + staged * sizeof(candidate_index_t);
 }
 
 /**
@@ -154,12 +158,12 @@ inline std::size_t tally_shared_bytes(candidate_index_t num_candidates) noexcept
  *  lanes. Privatizing keeps the scattered increments in shared memory, where an atomic costs a
  *  fraction of the global one it replaces, and leaves one global atomic per cell per block.
  */
-__global__ void tally_ballots_cuda_(ballots_t rankings, matrix_t preferences) {
+__global__ void tally_ballots_cuda_(ballots_t rankings, uint32_matrix_t preferences) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
     std::size_t const cells = static_cast<std::size_t>(num_candidates) * num_candidates;
 
-    extern __shared__ votes_count_t counters[];
+    extern __shared__ std::uint32_t counters[];
     for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x) counters[cell] = 0;
     __syncthreads();
 
@@ -212,7 +216,7 @@ inline bool device_can_read(void const* pointer) noexcept {
  *  Rankings the device can already reach are read where they lie, so a caller streaming chunks
  *  through one managed buffer pays for the staging once rather than once per chunk.
  */
-inline void tally_ballots_gpu(ballots_t rankings, matrix_t preferences) {
+inline void tally_ballots_gpu(ballots_t rankings, uint32_matrix_t preferences) {
 
     candidate_index_t const num_candidates = preferences.extent(0);
     std::size_t const num_ballots = rankings.extent(0);
@@ -229,8 +233,8 @@ inline void tally_ballots_gpu(ballots_t rankings, matrix_t preferences) {
     std::size_t const cells = static_cast<std::size_t>(num_candidates) * num_candidates;
     bool const staging_needed = !device_can_read(rankings.data_handle());
     managed_vector<candidate_index_t> staging(staging_needed ? entries : 0);
-    managed_vector<votes_count_t> device_counts(cells);
-    std::fill(device_counts.begin(), device_counts.end(), votes_count_t {0});
+    managed_vector<std::uint32_t> device_counts(cells);
+    std::fill(device_counts.begin(), device_counts.end(), std::uint32_t {0});
 
     // A driver copy lands the chunk on the device outright, where a host loop would leave the
     // kernel to fault every page in one at a time.
@@ -241,7 +245,7 @@ inline void tally_ballots_gpu(ballots_t rankings, matrix_t preferences) {
     ballots_t const device_rankings = staging_needed ? strided_view<candidate_index_t const, std::size_t>(
                                                            staging.data(), num_ballots, num_candidates, ballot_stride)
                                                      : rankings;
-    matrix_t const device_preferences = square_view(device_counts.data(), num_candidates, num_candidates);
+    uint32_matrix_t const device_preferences = square_view(device_counts.data(), num_candidates, num_candidates);
 
     std::size_t const warps_per_block = tally_block_size_k / warp_size_k;
     std::size_t const wanted_blocks = (num_ballots + warps_per_block - 1) / warps_per_block;
@@ -256,11 +260,11 @@ inline void tally_ballots_gpu(ballots_t rankings, matrix_t preferences) {
 
     for (candidate_index_t row = 0; row < num_candidates; row++)
         for (candidate_index_t column = 0; column < num_candidates; column++)
-            preferences(row, column) += device_counts.data()[row * num_candidates + column];
+            preferences(row, column) += device_counts.data()[std::size_t(row) * num_candidates + column];
 }
 
 /** Adds one chunk of complete rankings into an existing matrix, on whichever processor was named. */
-inline void tally_ballots(ballots_t rankings, matrix_t preferences, backend_t backend) {
+inline void tally_ballots(ballots_t rankings, uint32_matrix_t preferences, backend_t backend) {
     if (backend == backend_t::cpu_k) return tally_ballots_cpu(rankings, preferences);
     return tally_ballots_gpu(rankings, preferences);
 }
@@ -268,7 +272,7 @@ inline void tally_ballots(ballots_t rankings, matrix_t preferences, backend_t ba
 #else
 
 /** Adds one chunk of complete rankings into an existing matrix; a CPU-only build has one processor. */
-inline void tally_ballots(ballots_t rankings, matrix_t preferences, backend_t backend) {
+inline void tally_ballots(ballots_t rankings, uint32_matrix_t preferences, backend_t backend) {
     if (backend == backend_t::gpu_k)
         throw std::runtime_error("This build has no CUDA support, so `gpu` is unavailable");
     tally_ballots_cpu(rankings, preferences);
@@ -277,3 +281,143 @@ inline void tally_ballots(ballots_t rankings, matrix_t preferences, backend_t ba
 #endif // defined(SCALING_ELECTIONS_WITH_CUDA)
 
 #pragma endregion Tally
+
+enum class unranked_t : std::uint8_t { unknown_k, worse_k };
+
+struct ragged_ballots {
+    candidate_index_t const* candidates;
+    ballot_offset_t const* offsets;
+    rank_label_t const* ranks;
+    voter_weight_t const* weights;
+    std::size_t num_ballots;
+    candidate_index_t num_candidates;
+    unranked_t unranked;
+};
+
+template <typename arithmetic_type_>
+inline void tally_ballots_cpu(ragged_ballots ballots, strided_matrix<arithmetic_type_> preferences) {
+    using arithmetic_t = arithmetic_type_;
+    std::size_t const n = ballots.num_candidates;
+    std::size_t const cells = checked_product(n, n);
+#pragma omp parallel
+    {
+        std::vector<arithmetic_t> counts(cells, arithmetic_t {0});
+        std::vector<bool> present(n);
+#pragma omp for schedule(static)
+        for (std::size_t ballot = 0; ballot < ballots.num_ballots; ++ballot) {
+            auto const first = ballots.offsets[ballot];
+            auto const last = ballots.offsets[ballot + 1];
+            arithmetic_t const weight(ballots.weights ? ballots.weights[ballot] : 1);
+            if (weight == arithmetic_t {0}) continue;
+            if (ballots.unranked == unranked_t::worse_k) {
+                std::fill(present.begin(), present.end(), false);
+                for (auto entry = first; entry < last; ++entry) present[ballots.candidates[entry]] = true;
+            }
+            for (auto entry = first; entry < last; ++entry) {
+                std::size_t const preferred = ballots.candidates[entry];
+                auto const rank = ballots.ranks ? ballots.ranks[entry] : entry - first;
+                for (auto other = first; other < last; ++other)
+                    if (rank < (ballots.ranks ? ballots.ranks[other] : other - first))
+                        counts[preferred * n + ballots.candidates[other]] += weight;
+                if (ballots.unranked == unranked_t::worse_k)
+                    for (candidate_index_t other = 0; other < n; ++other)
+                        if (!present[other]) counts[preferred * n + other] += weight;
+            }
+        }
+#pragma omp critical
+        for (std::size_t cell = 0; cell < cells; ++cell) preferences(cell / n, cell % n) += counts[cell];
+    }
+}
+
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
+template <typename arithmetic_type_>
+__global__ void tally_ragged_ballots_cuda_(ragged_ballots ballots, arithmetic_type_* counts) {
+    using arithmetic_t = arithmetic_type_;
+    extern __shared__ std::uint32_t present[];
+    std::size_t const n = ballots.num_candidates;
+    std::size_t const words = (n + 31) / 32;
+    for (std::size_t ballot = blockIdx.x; ballot < ballots.num_ballots; ballot += gridDim.x) {
+        auto const first = ballots.offsets[ballot];
+        auto const last = ballots.offsets[ballot + 1];
+        arithmetic_t const weight(ballots.weights ? ballots.weights[ballot] : 1);
+        if (weight == arithmetic_t {0}) continue;
+        if (ballots.unranked == unranked_t::worse_k) {
+            for (std::size_t word = threadIdx.x; word < words; word += blockDim.x) present[word] = 0;
+            __syncthreads();
+            for (auto entry = first + threadIdx.x; entry < last; entry += blockDim.x) {
+                auto const candidate = ballots.candidates[entry];
+                atomicOr(present + candidate / 32, std::uint32_t {1} << (candidate % 32));
+            }
+            __syncthreads();
+        }
+        for (auto entry = first + threadIdx.x; entry < last; entry += blockDim.x) {
+            std::size_t const preferred = ballots.candidates[entry];
+            auto const rank = ballots.ranks ? ballots.ranks[entry] : entry - first;
+            for (auto other = first; other < last; ++other)
+                if (rank < (ballots.ranks ? ballots.ranks[other] : other - first))
+                    atomic_add(counts + preferred * n + ballots.candidates[other], weight);
+            if (ballots.unranked == unranked_t::worse_k)
+                for (candidate_index_t other = 0; other < n; ++other)
+                    if (!(present[other / 32] & (std::uint32_t {1} << (other % 32))))
+                        atomic_add(counts + preferred * n + other, weight);
+        }
+        __syncthreads();
+    }
+}
+
+template <typename arithmetic_type_>
+inline void tally_ballots_gpu(ragged_ballots ballots, strided_matrix<arithmetic_type_> preferences) {
+    using arithmetic_t = arithmetic_type_;
+    if (!ballots.num_ballots) return;
+    std::size_t const entries = ballots.offsets[ballots.num_ballots];
+    std::size_t const cells = checked_product(ballots.num_candidates, ballots.num_candidates);
+    std::size_t const shared_bytes = ballots.unranked == unranked_t::worse_k
+                                         ? ((std::size_t(ballots.num_candidates) + 31) / 32) * 4
+                                         : 0;
+    int device = 0;
+    cudaDeviceProp properties;
+    if (cudaGetDevice(&device) != cudaSuccess || cudaGetDeviceProperties(&properties, device) != cudaSuccess)
+        throw std::runtime_error("No CUDA devices available");
+    if (shared_bytes > static_cast<std::size_t>(properties.sharedMemPerBlock))
+        throw std::invalid_argument("Ballot presence bitmap exceeds device shared memory");
+    managed_vector<candidate_index_t> candidates(entries), ranks(ballots.ranks ? entries : 0);
+    managed_vector<std::uint64_t> offsets(ballots.num_ballots + 1), weights(ballots.weights ? ballots.num_ballots : 0);
+    managed_vector<arithmetic_t> counts(cells);
+    auto copy = [](auto& destination, auto const* source) {
+        if (!destination.empty() &&
+            cudaMemcpy(destination.data(), source, checked_product(destination.size(), sizeof(*source)),
+                       cudaMemcpyHostToDevice) != cudaSuccess)
+            throw std::runtime_error("Failed to copy ballots to device");
+    };
+    copy(candidates, ballots.candidates);
+    copy(offsets, ballots.offsets);
+    copy(ranks, ballots.ranks);
+    copy(weights, ballots.weights);
+    if (cudaMemset(counts.data(), 0, checked_product(cells, sizeof(arithmetic_t))) != cudaSuccess)
+        throw std::runtime_error("Failed to clear device memory");
+    ragged_ballots const device_ballots {candidates.data(),
+                                         offsets.data(),
+                                         ballots.ranks ? ranks.data() : nullptr,
+                                         ballots.weights ? weights.data() : nullptr,
+                                         ballots.num_ballots,
+                                         ballots.num_candidates,
+                                         ballots.unranked};
+    unsigned const blocks = static_cast<unsigned>(std::min<std::size_t>(ballots.num_ballots, 65535));
+    tally_ragged_ballots_cuda_<<<blocks, tally_block_size_k, shared_bytes>>>(device_ballots, counts.data());
+    cudaError_t const error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    if (cudaDeviceSynchronize() != cudaSuccess) throw std::runtime_error("CUDA tally did not complete");
+    for (std::size_t cell = 0; cell < cells; ++cell)
+        preferences(cell / ballots.num_candidates, cell % ballots.num_candidates) += counts[cell];
+}
+#endif
+
+template <typename arithmetic_type_>
+inline void tally_ballots(ragged_ballots ballots, strided_matrix<arithmetic_type_> preferences, backend_t backend) {
+    if (backend == backend_t::cpu_k) return tally_ballots_cpu(ballots, preferences);
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
+    return tally_ballots_gpu(ballots, preferences);
+#else
+    throw std::runtime_error("This build has no GPU support compiled in");
+#endif
+}

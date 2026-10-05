@@ -86,6 +86,7 @@ namespace shaped = std;
 #define cudaFree                 hipFree
 #define cudaMemGetInfo           hipMemGetInfo
 #define cudaMemcpy               hipMemcpy
+#define cudaMemcpy2D             hipMemcpy2D
 #define cudaMemcpyDeviceToHost   hipMemcpyDeviceToHost
 #define cudaMemcpyHostToDevice   hipMemcpyHostToDevice
 #define cudaMemset               hipMemset
@@ -114,32 +115,102 @@ namespace shaped = std;
  */
 constexpr std::uint32_t tile_size_k = 32;
 
-using votes_count_t = std::uint32_t;
+using default_stored_count_t = std::uint32_t;
+using default_schulze_arithmetic_t = std::uint32_t;
+using default_kemeny_arithmetic_t = std::uint64_t;
+using rank_label_t = std::uint32_t;
+using ballot_offset_t = std::uint64_t;
+using voter_weight_t = std::uint64_t;
 using candidate_index_t = std::uint32_t;
 
 enum class backend_t : std::uint8_t { cpu_k, gpu_k };
-enum class score_type_t : std::uint8_t { auto_k, uint16_k, uint32_k, uint64_k };
+enum class score_type_t : std::uint8_t { auto_k, uint16_k, uint32_k, uint64_k, saturated64_k };
+
+template <typename count_type_>
+struct saturated {
+    using count_t = count_type_;
+    count_t value;
+
+    saturated() = default;
+    SCALING_ELECTIONS_HOST_DEVICE constexpr saturated(count_t count) noexcept : value(count) {}
+    SCALING_ELECTIONS_HOST_DEVICE constexpr explicit operator count_t() const noexcept { return value; }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr saturated operator+(saturated other) const noexcept {
+        count_t const limit = std::numeric_limits<count_t>::max();
+        return value > limit - other.value ? limit : value + other.value;
+    }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr saturated& operator+=(saturated other) noexcept {
+        return *this = *this + other;
+    }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr bool operator==(saturated other) const noexcept {
+        return value == other.value;
+    }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr bool operator!=(saturated other) const noexcept {
+        return value != other.value;
+    }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr bool operator<(saturated other) const noexcept {
+        return value < other.value;
+    }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr bool operator>(saturated other) const noexcept {
+        return value > other.value;
+    }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr bool operator<=(saturated other) const noexcept {
+        return value <= other.value;
+    }
+    SCALING_ELECTIONS_HOST_DEVICE constexpr bool operator>=(saturated other) const noexcept {
+        return value >= other.value;
+    }
+};
+
+template <typename count_type_>
+struct std::numeric_limits<saturated<count_type_>> : std::numeric_limits<count_type_> {
+    SCALING_ELECTIONS_HOST_DEVICE static constexpr saturated<count_type_> max() noexcept {
+        return std::numeric_limits<count_type_>::max();
+    }
+};
+
+inline std::size_t checked_product(std::size_t count, std::size_t width) {
+    if (width && count > std::numeric_limits<std::size_t>::max() / width)
+        throw std::overflow_error("Allocation size exceeds the addressable range");
+    return count * width;
+}
+
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
+__device__ inline void atomic_add(std::uint32_t* counter, std::uint32_t value) { atomicAdd(counter, value); }
+__device__ inline void atomic_add(std::uint64_t* counter, std::uint64_t value) {
+    atomicAdd(reinterpret_cast<unsigned long long*>(counter), static_cast<unsigned long long>(value));
+}
+__device__ inline void atomic_add(saturated<std::uint64_t>* counter, saturated<std::uint64_t> value) {
+    auto* word = reinterpret_cast<unsigned long long*>(&counter->value);
+    unsigned long long observed = atomicCAS(word, 0ull, 0ull);
+    unsigned long long previous;
+    do {
+        previous = observed;
+        auto const sum = saturated<std::uint64_t>(previous) + value;
+        observed = atomicCAS(word, previous, static_cast<unsigned long long>(sum.value));
+    } while (previous != observed);
+}
+#endif
 
 #pragma region Shaped Views
 
 /** A two-dimensional view whose row stride travels with its extents rather than beside them. */
-template <typename element_type_, typename index_type_ = candidate_index_t>
+template <typename element_type_, typename index_type_ = std::size_t>
 using strided_matrix = shaped::mdspan<element_type_, shaped::dextents<index_type_, 2>, shaped::layout_stride>;
 
 /** The extents a matrix of vote counts is addressed by. */
-using matrix_extents_t = shaped::dextents<candidate_index_t, 2>;
+using matrix_extents_t = shaped::dextents<std::size_t, 2>;
 
 /** A writable view over a matrix of vote counts. */
-using matrix_t = strided_matrix<votes_count_t>;
+using uint32_matrix_t = strided_matrix<std::uint32_t>;
 
 /** A read-only view over a matrix of vote counts. */
-using const_matrix_t = strided_matrix<votes_count_t const>;
+using const_uint32_matrix_t = strided_matrix<std::uint32_t const>;
 
 /** A read-only view over a chunk of complete rankings, one ballot to a row, best candidate first. */
 using ballots_t = strided_matrix<candidate_index_t const, std::size_t>;
 
 /** Views @p data as @p rows by @p columns cells whose rows sit @p stride apart. */
-template <typename element_type_, typename index_type_ = candidate_index_t>
+template <typename element_type_, typename index_type_ = std::size_t>
 inline strided_matrix<element_type_, index_type_> strided_view( //
     element_type_* data, std::type_identity_t<index_type_> rows, std::type_identity_t<index_type_> columns,
     std::type_identity_t<index_type_> stride) noexcept {
@@ -151,7 +222,7 @@ inline strided_matrix<element_type_, index_type_> strided_view( //
 }
 
 /** Views @p data as @p edge by @p edge cells whose rows sit @p stride apart. */
-template <typename element_type_, typename index_type_ = candidate_index_t>
+template <typename element_type_, typename index_type_ = std::size_t>
 inline strided_matrix<element_type_, index_type_> square_view( //
     element_type_* data, std::type_identity_t<index_type_> edge, std::type_identity_t<index_type_> stride) noexcept {
     return strided_view<element_type_, index_type_>(data, edge, edge, stride);
@@ -180,7 +251,7 @@ struct managed_allocator {
 
     value_t* allocate(std::size_t count) {
         value_t* pointer = nullptr;
-        if (cudaMallocManaged(&pointer, count * sizeof(value_t)) != cudaSuccess) throw std::bad_alloc();
+        if (cudaMallocManaged(&pointer, checked_product(count, sizeof(value_t))) != cudaSuccess) throw std::bad_alloc();
         return pointer;
     }
 

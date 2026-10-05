@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from kemeny import KemenyResult
+
 sys.path.insert(0, str(Path(__file__).resolve().parent / "build"))
 
 _RUN_SEED = int(os.environ.get("SCALINGELECTIONS_TESTS_SEED", int.from_bytes(os.urandom(4), "little")))
@@ -99,7 +101,7 @@ class Implementation:
 
     tally_ballots: Callable[..., np.ndarray]
     compute_strongest_paths: Callable[..., np.ndarray]
-    compute_kemeny_ranking: Callable[..., tuple[list[int], int]]
+    compute_kemeny_ranking: Callable[..., KemenyResult]
     compute_split_cycle_winners: Callable[..., list[int]]
 
 

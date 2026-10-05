@@ -13,12 +13,17 @@ import schulze
 from ballots import (
     Backend,
     ScoreType,
+    Unranked,
     build_pairwise_preferences,
     complete_rankings,
     generate_preferences,
     populate_preferences_from_ranking,
     positive_margins,
+    prepare_ballots,
     tally_chunks,
+    tally_ragged,
+    tally_score_type,
+    unsigned_array,
 )
 from schulze import (
     compute_election_results,
@@ -26,6 +31,8 @@ from schulze import (
     compute_strongest_paths_tiled_cpu,
     select_split_cycle_winners,
 )
+
+KemenyResult = kemeny.KemenyResult
 
 
 def _module(implementation):
@@ -74,38 +81,74 @@ def _resolve(implementation, backend):
     raise RuntimeError(f"{implementation or 'Any installed'} implementation has no {backend} backend")
 
 
-def _uint32_matrix(values, *, square):
-    values = np.asarray(values)
-    if values.ndim != 2 or values.shape[1] == 0 or (square and values.shape[0] != values.shape[1]):
-        raise ValueError(
-            "Preferences must be a nonempty square matrix"
-            if square
-            else "Rankings must be a two-dimensional array with at least one candidate"
-        )
-    if values.dtype.kind not in "iu":
-        raise TypeError("Entries must be integers")
-    if np.any(values < 0) or np.any(values > np.iinfo(np.uint32).max):
-        raise OverflowError("Entries must fit UInt32")
-    return np.ascontiguousarray(values, dtype=np.uint32)
+def _preferences_matrix(values):
+    values = unsigned_array(values, np.uint64, ndim=2)
+    if not values.shape[0] or values.shape[0] != values.shape[1]:
+        raise ValueError("Preferences must be a nonempty square matrix")
+    dtype = np.uint32 if np.max(values) <= np.iinfo(np.uint32).max else np.uint64
+    return np.ascontiguousarray(values, dtype=dtype)
 
 
-def tally_ballots(rankings, *, implementation: str | None = None, backend: Backend = Backend.cpu) -> np.ndarray:
-    """Count complete rankings using the requested implementation and device."""
+def tally_ballots(
+    rankings,
+    *,
+    offsets=None,
+    num_candidates=None,
+    ranks=None,
+    weights=None,
+    unranked: Unranked = Unranked.unknown,
+    score_type: ScoreType = ScoreType.auto,
+    implementation: str | None = None,
+    backend: Backend = Backend.cpu,
+) -> np.ndarray:
+    """Count integer-weighted ranked ballots, preserving explicit ties and omitted-candidate semantics."""
     module = _resolve(implementation, backend)
-    rankings = _uint32_matrix(rankings, square=False)
-    n = rankings.shape[1]
-    if rankings.shape[0] > np.iinfo(np.uint32).max:
-        raise OverflowError("Ballot count must fit UInt32")
-    if np.any(np.sort(rankings, axis=1) != np.arange(n, dtype=np.uint32)):
-        raise ValueError("Every ballot must rank each candidate exactly once")
-    if backend == "gpu" and module is not None and module.__name__ == "scalingelections_mojo" and n > 64:
-        raise ValueError("The GPU tally supports at most 64 candidates")
+    unranked = Unranked(unranked)
+    if num_candidates is not None and (
+        isinstance(num_candidates, (bool, np.bool_))
+        or not isinstance(num_candidates, (int, np.integer))
+        or not 0 < num_candidates <= np.iinfo(np.uint32).max
+    ):
+        raise ValueError("num_candidates must be a positive UInt32 integer")
+    if offsets is None and ranks is None and weights is None:
+        dense = unsigned_array(rankings, np.uint32, ndim=2)
+        n = dense.shape[1]
+        if n and (num_candidates is None or num_candidates == n):
+            if np.any(np.sort(dense, axis=1) != np.arange(n, dtype=np.uint32)):
+                raise ValueError("Every ballot must rank each candidate exactly once")
+            resolved = tally_score_type(np.array([len(dense)], dtype=np.uint64), score_type)
+            if module is not None:
+                return module.tally_ballots(dense, backend=backend, score_type=resolved.value)
+            preferences = np.zeros((n, n), dtype=f"uint{resolved.bits}")
+            for ranking in dense:
+                populate_preferences_from_ranking(preferences, ranking)
+            return preferences
+    ids, offsets, n, ranks, weights = prepare_ballots(rankings, offsets, num_candidates, ranks, weights)
+    resolved = tally_score_type(weights, score_type)
     if module is not None:
-        return module.tally_ballots(rankings, backend=backend)
-    preferences = np.zeros((n, n), dtype=np.uint32)
-    for ranking in rankings:
-        populate_preferences_from_ranking(preferences, ranking)
-    return preferences
+        return module.tally_ballots(
+            ids,
+            offsets=offsets,
+            num_candidates=n,
+            ranks=ranks,
+            weights=weights,
+            unranked=unranked.value,
+            backend=backend,
+            score_type=resolved.value,
+        )
+    result = tally_ragged(
+        ids,
+        offsets,
+        n,
+        ranks,
+        weights,
+        unranked is Unranked.worse,
+        np.dtype(f"uint{resolved.bits}").type,
+        resolved is ScoreType.saturated64,
+    )
+    if np.any(result == np.iinfo(np.uint64).max):
+        raise OverflowError("Tally exceeds the representable count range")
+    return result
 
 
 def compute_strongest_paths(
@@ -117,14 +160,12 @@ def compute_strongest_paths(
 ) -> np.ndarray:
     """Compute Schulze paths using the requested implementation and device."""
     module = _resolve(implementation, backend)
-    preferences = _uint32_matrix(preferences, square=True)
+    preferences = _preferences_matrix(preferences)
     requested_type = ScoreType(score_type)
     score_type = schulze.resolve_score_type(preferences, requested_type)
     if module is not None:
-        return module.compute_strongest_paths(preferences, backend=backend, score_type=requested_type.value)
-    return compute_strongest_paths_tiled_cpu(preferences.astype(score_type.value, copy=False)).astype(
-        np.uint32, copy=False
-    )
+        return module.compute_strongest_paths(preferences, backend=backend, score_type=score_type.value)
+    return compute_strongest_paths_tiled_cpu(preferences.astype(f"uint{score_type.bits}", copy=False))
 
 
 def compute_kemeny_ranking(
@@ -133,13 +174,15 @@ def compute_kemeny_ranking(
     implementation: str | None = None,
     backend: Backend = Backend.cpu,
     score_type: ScoreType = ScoreType.auto,
-) -> tuple[list[int], int]:
+) -> kemeny.KemenyResult:
     """Compute an exact ranking, choosing arithmetic width before allocating tables."""
     module = _resolve(implementation, backend)
-    preferences = _uint32_matrix(preferences, square=True)
+    preferences = _preferences_matrix(preferences)
     score_type = kemeny.resolve_score_type(preferences, score_type)
     if module is not None:
-        return module.compute_kemeny_ranking(preferences, backend=backend, score_type=score_type.value)
+        return kemeny.KemenyResult(
+            *module.compute_kemeny_ranking(preferences, backend=backend, score_type=score_type.value)
+        )
     return kemeny.compute_kemeny_ranking(preferences, score_type=score_type)
 
 
@@ -152,20 +195,24 @@ def compute_split_cycle_winners(
 ) -> list[int]:
     """Compute the Split Cycle winning set using the requested implementation and device."""
     module = _resolve(implementation, backend)
-    preferences = _uint32_matrix(preferences, square=True)
+    preferences = _preferences_matrix(preferences)
     requested_type = ScoreType(score_type)
+    if requested_type is ScoreType.saturated64:
+        schulze.resolve_score_type(preferences, requested_type)
     score_type = schulze.resolve_score_type(positive_margins(preferences), requested_type)
     if module is not None:
         return module.compute_split_cycle_winners(preferences, backend=backend, score_type=requested_type.value)
     return select_split_cycle_winners(
         preferences,
-        compute_strongest_paths_tiled_cpu(positive_margins(preferences).astype(score_type.value, copy=False)),
+        compute_strongest_paths_tiled_cpu(positive_margins(preferences).astype(f"uint{score_type.bits}", copy=False)),
     )
 
 
 __all__ = [
     "Backend",
     "ScoreType",
+    "Unranked",
+    "KemenyResult",
     "available_backends",
     "available_implementations",
     # Ballots into the pairwise matrix every method reads.

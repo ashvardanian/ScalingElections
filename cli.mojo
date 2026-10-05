@@ -14,7 +14,7 @@ from max.gpu.host import DeviceContext
 import ballots
 import kemeny
 import schulze
-from ballots import Backend, PreferenceMatrix, ScoreType
+from ballots import Backend, UInt32VoteMatrix, ScoreType
 from kemeny import KemenySolution
 
 
@@ -43,7 +43,7 @@ def profile[
     return result^
 
 
-def check_matrix(actual: PreferenceMatrix, expected: PreferenceMatrix) raises:
+def check_matrix(actual: UInt32VoteMatrix, expected: UInt32VoteMatrix) raises:
     for row in range(expected.num_candidates):
         for column in range(expected.num_candidates):
             if actual[row, column] != expected[row, column]:
@@ -65,7 +65,7 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
             rankings[base + upper] = rankings[base + chosen]
             rankings[base + chosen] = held
 
-    var baseline = PreferenceMatrix(0)
+    var baseline = UInt32VoteMatrix(0)
     var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     for backend in backends:
         if not selected_by(selector, backend.name()):
@@ -74,10 +74,10 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
             print("GPU unavailable")
             continue
 
-        def calculate() raises {imm} -> PreferenceMatrix:
+        def calculate() raises {imm} -> UInt32VoteMatrix:
             return ballots.tally_ballots(rankings, voters, n, backend=backend)
 
-        var result = profile[PreferenceMatrix](backend.name(), calculate, warmup, repeat, Float64(voters), "ballots/s")
+        var result = profile[UInt32VoteMatrix](backend.name(), calculate, warmup, repeat, Float64(voters), "ballots/s")
         for row in range(n):
             if result[row, row] != 0:
                 raise Error("Nonzero tally diagonal")
@@ -93,10 +93,10 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
 
 
 def run_schulze(
-    preferences: PreferenceMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType
+    preferences: UInt32VoteMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType
 ) raises:
-    print("Score bits:", schulze.resolve_score_type(preferences, score_type).bits)
-    var baseline = PreferenceMatrix(0)
+    print("Score bits:", schulze.resolve_score_type(preferences, score_type).width())
+    var baseline = UInt32VoteMatrix(0)
     var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     var n = preferences.num_candidates
     for backend in backends:
@@ -106,10 +106,10 @@ def run_schulze(
             print("GPU unavailable")
             continue
 
-        def calculate() raises {imm} -> PreferenceMatrix:
+        def calculate() raises {imm} -> UInt32VoteMatrix:
             return schulze.compute_strongest_paths(preferences, backend=backend, score_type=score_type)
 
-        var result = profile[PreferenceMatrix](backend.name(), calculate, warmup, repeat, Float64(n) ** 3, "cells/s")
+        var result = profile[UInt32VoteMatrix](backend.name(), calculate, warmup, repeat, Float64(n) ** 3, "cells/s")
         if baseline.num_candidates:
             check_matrix(result, baseline)
         else:
@@ -120,12 +120,12 @@ def run_schulze(
     var top = List[Int]()
     for place in range(min(5, len(outcome.ranking))):
         top.append(outcome.ranking[place])
-    print("Winner:", outcome.winner, "Top candidates:", top)
+    print("Winners:", outcome.winners, "Top candidates:", top)
 
 
-def run_kemeny(preferences: PreferenceMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType) raises:
-    print("Score bits:", kemeny.resolve_score_type(preferences, score_type).bits)
-    var baseline = KemenySolution(List[Int](), 0)
+def run_kemeny(preferences: UInt32VoteMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType) raises:
+    print("Score bits:", kemeny.resolve_score_type(preferences, score_type).width())
+    var baseline = KemenySolution(List[Int](), List[Int](), True, 0)
     var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     var n = preferences.num_candidates
     for backend in backends:
@@ -136,7 +136,10 @@ def run_kemeny(preferences: PreferenceMatrix, selector: String, warmup: Int, rep
             continue
 
         def calculate() raises {imm} -> KemenySolution:
-            return kemeny.compute_kemeny_ranking(preferences, backend=backend, score_type=score_type)
+            var result = kemeny.compute_kemeny_ranking(preferences, backend=backend, score_type=score_type)
+            if result.score == UInt64.MAX:
+                raise Error("Kemeny optimum reached the saturation sentinel")
+            return result^
 
         var result = profile[KemenySolution](backend.name(), calculate, warmup, repeat, 0, "")
         var score = UInt64(0)
@@ -151,14 +154,21 @@ def run_kemeny(preferences: PreferenceMatrix, selector: String, warmup: Int, rep
         if score != UInt64(result.score):
             raise Error("Kemeny ranking disagrees with its score")
         if len(baseline.ranking):
-            if result.score != baseline.score or result.ranking != baseline.ranking:
+            if (
+                result.score != baseline.score
+                or result.ranking != baseline.ranking
+                or result.winners != baseline.winners
+                or result.unique != baseline.unique
+            ):
                 raise Error("Backend Kemeny results disagree")
             print("  ✓ Rankings and scores match")
         else:
             baseline = result^
     if not len(baseline.ranking):
         raise Error("No selected backend could run")
-    print("Score:", baseline.score, "Ranking:", baseline.ranking)
+    print(
+        "Score:", baseline.score, "Ranking:", baseline.ranking, "Winners:", baseline.winners, "Unique:", baseline.unique
+    )
 
 
 def format_time(elapsed_ns: Int) -> String:
@@ -262,7 +272,7 @@ comptime USAGE = """Usage: scalingelections [OPTIONS]
   --warmup N           Warmup iterations (default: 1)
   --repeat N           Measured iterations (default: 1)
   --seed N             Reproducible input seed (default: 42)
-  --score-bits N       Solver arithmetic: auto, 16, 32, or 64 (default: auto)
+  --score-bits TYPE    Solver arithmetic: auto, uint16, uint32, uint64, or saturated64 (default: auto)
   --help, -h           Show help
 """
 
@@ -280,15 +290,7 @@ def main() raises:
     var repeat = parse_int_arg(args, "--repeat", 1)
     var seed = parse_int_arg(args, "--seed", 42)
     var requested_type = parse_text_arg(args, "--score-bits", "auto")
-    var score_type = ScoreType.auto
-    if requested_type == "16":
-        score_type = ScoreType.uint16
-    elif requested_type == "32":
-        score_type = ScoreType.uint32
-    elif requested_type == "64":
-        score_type = ScoreType.uint64
-    elif requested_type != "auto":
-        raise Error("--score-bits must be auto, 16, 32, or 64")
+    var score_type = ScoreType.parse(requested_type)
     var selector = parse_text_arg(args, "--filter", ".")
     selector = parse_text_arg(args, "-k", selector)
     if n < 1 or voters < 0 or warmup < 0 or repeat < 1:
@@ -310,7 +312,7 @@ def main() raises:
         run_ballots(n, voters, seed, selector, warmup, repeat)
         return
     var preferences = ballots.generate_random_preferences(n, voters, seed)
-    var solvers = StringDict[def(PreferenceMatrix, String, Int, Int, ScoreType) raises thin -> None]()
+    var solvers = StringDict[def(UInt32VoteMatrix, String, Int, Int, ScoreType) raises thin -> None]()
     solvers["schulze"] = run_schulze
     solvers["kemeny"] = run_kemeny
     solvers[method](preferences, selector, warmup, repeat, score_type)

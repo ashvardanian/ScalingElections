@@ -35,7 +35,7 @@ from scalingelections import (
 preferences = build_pairwise_preferences(ballots)            # ballots → N×N counts
 strengths = compute_strongest_paths(preferences)             # Schulze widest paths
 undefeated = compute_split_cycle_winners(preferences)        # Split Cycle winning set
-ranking, disagreement = compute_kemeny_ranking(preferences)  # exact Kemeny-Young
+consensus = compute_kemeny_ranking(preferences)              # ranking, score, winners, unique
 ```
 
 Every entry point takes a `backend=` naming where the work runs, and raises rather than quietly falling back when a device or a build cannot serve it:
@@ -44,6 +44,10 @@ Every entry point takes a `backend=` naming where the work runs, and raises rath
 compute_strongest_paths(preferences, backend="gpu")
 compute_kemeny_ranking(preferences, backend="gpu")   # one launch per popcount layer
 ```
+
+`tally_ballots` also accepts flat candidate IDs with CSR `offsets`, an explicit `num_candidates`, optional equal-rank `ranks`, and integer `weights` per voter.
+`unranked="unknown"` leaves omitted comparisons unspecified; `unranked="worse"` places all omitted candidates below those listed, tied with each other.
+`score_type="saturated64"` reserves the maximum UInt64 value as an overflow sentinel and raises if a tally cell or the final Kemeny optimum reaches it.
 
 An electorate need not sit in memory at once, so the tally takes blocks and sums one matrix over them:
 
@@ -194,16 +198,16 @@ __No column is all ticks, and none can be.__
 [Moulin proved in 1988](https://doi.org/10.1016/0022-0531(88)90253-0) that every Condorcet-consistent rule admits the no-show paradox once there are four candidates and twenty-five voters, so the price of the first row is paid somewhere below it.
 Split Cycle escapes the _positive_ half of that — a ballot ranking someone first never demotes them — but not the full participation criterion Moulin rules out.
 
-### A Ballot That Hurts Its Own Favourite
+### A Ballot That Changes the Representative Ranking
 
-Eleven voters ranking Python, Rust, Go and Java are enough to show Schulze failing positive involvement.
-Ten of them elect Java, and adding one more ballot that puts Java _first_ elects Python instead.
-Split Cycle, closing the same kernel over margins rather than winning votes, keeps Java either way.
+Eleven voters ranking Python, Rust, Go and Java illustrate why a representative ranking must be distinguished from the full winning set.
+Adding a ballot that puts Java _first_ changes the first candidate in the representative Schulze ranking from Java to Python, while Java remains a winner.
+Schulze and Split Cycle both retain Java in this example.
 
-| Electorate                         | Schulze | Split Cycle      |
-| :--------------------------------- | :------ | :--------------- |
-| 10 voters                          | Java    | Python, Go, Java |
-| Plus one ballot ranking Java first | Python  | Python, Java     |
+| Electorate                         | Schulze winners  | Split Cycle      |
+| :--------------------------------- | :--------------- | :--------------- |
+| 10 voters                          | Python, Go, Java | Python, Go, Java |
+| Plus one ballot ranking Java first | Python, Java     | Python, Java     |
 
 ### Three Rules, One Electorate, Three Answers
 
