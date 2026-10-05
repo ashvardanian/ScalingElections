@@ -7,7 +7,11 @@ so this is the Held-Karp subset dynamic program instead: `O(n * 2^n)` time again
 memory, exact rather than approximate, and practical to roughly two dozen candidates.
 """
 
+from std.bit import count_trailing_zeros
+
 from max.algorithm import parallelize
+from max.gpu import block_dim, block_idx, thread_idx
+from max.gpu.host import DeviceContext
 
 from ballots import PreferenceMatrix
 
@@ -224,3 +228,132 @@ def kemeny_ranking(preferences: PreferenceMatrix) raises -> KemenySolution:
 
 
 # endregion Kemeny
+
+
+@always_inline
+def gpu_votes_against(
+    sums: Pointer[UInt64, MutUntrackedOrigin], low_bits: Int, num_candidates: Int, candidate: Int, subset: Int
+) -> UInt64:
+    var low_states = 1 << low_bits
+    var high_states = 1 << (num_candidates - low_bits)
+    return (
+        sums[unsafe_offset=candidate * low_states + (subset & (low_states - 1))]
+        + sums[unsafe_offset=num_candidates * low_states + candidate * high_states + (subset >> low_bits)]
+    )
+
+
+def gpu_kemeny_layer(
+    sums: Pointer[UInt64, MutUntrackedOrigin],
+    binomials: Pointer[UInt32, MutUntrackedOrigin],
+    costs: Pointer[UInt64, MutUntrackedOrigin],
+    num_candidates_arg: Int32,
+    seated_arg: Int32,
+    layer_states_arg: Int32,
+):
+    var num_candidates = Int(num_candidates_arg)
+    var seated = Int(seated_arg)
+    var layer_states = Int(layer_states_arg)
+    var rank = Int(block_idx.x) * Int(block_dim.x) + Int(thread_idx.x)
+    if rank >= layer_states:
+        return
+    var subset = 0
+    var remaining = seated
+    var candidate = num_candidates
+    while remaining != 0 and candidate != 0:
+        candidate -= 1
+        var below = Int(binomials[unsafe_offset=candidate * (num_candidates + 1) + remaining])
+        if rank >= below:
+            rank -= below
+            subset |= 1 << candidate
+            remaining -= 1
+    var best = UInt64.MAX
+    var members = subset
+    while members:
+        var bit = members & -members
+        var index = Int(count_trailing_zeros(bit))
+        var rest = subset ^ bit
+        best = min(
+            best, costs[unsafe_offset=rest] + gpu_votes_against(sums, num_candidates // 2, num_candidates, index, rest)
+        )
+        members ^= bit
+    costs[unsafe_offset=subset] = best
+
+
+def gpu_kemeny_trace(
+    sums: Pointer[UInt64, MutUntrackedOrigin],
+    costs: Pointer[UInt64, MutUntrackedOrigin],
+    result: Pointer[UInt64, MutUntrackedOrigin],
+    num_candidates_arg: Int32,
+):
+    var num_candidates = Int(num_candidates_arg)
+    var subset = (1 << num_candidates) - 1
+    result[unsafe_offset=num_candidates] = costs[unsafe_offset=subset]
+    for place in range(num_candidates - 1, -1, -1):
+        result[unsafe_offset=place] = UInt64.MAX
+        for candidate in range(num_candidates):
+            var bit = 1 << candidate
+            if not subset & bit:
+                continue
+            var rest = subset ^ bit
+            if costs[unsafe_offset=subset] == costs[unsafe_offset=rest] + gpu_votes_against(
+                sums, num_candidates // 2, num_candidates, candidate, rest
+            ):
+                result[unsafe_offset=place] = UInt64(candidate)
+                subset = rest
+                break
+
+
+def kemeny_ranking_gpu(preferences: PreferenceMatrix) raises -> KemenySolution:
+    """Solves exact consensus on the GPU, one launch per subset population count."""
+    var n = preferences.num_candidates
+    if n < 1 or n > KEMENY_MAX_CANDIDATES:
+        raise Error("Kemeny supports 1 to " + String(KEMENY_MAX_CANDIDATES) + " candidates")
+    var sums = KemenySums(preferences)
+    var binomials = binomial_table(n)
+    var ctx = DeviceContext()
+    var host_sums = ctx.enqueue_create_host_buffer[DType.uint64](len(sums.low) + len(sums.high))
+    var device_sums = ctx.enqueue_create_buffer[DType.uint64](len(sums.low) + len(sums.high))
+    var host_binomials = ctx.enqueue_create_host_buffer[DType.uint32](len(binomials))
+    var device_binomials = ctx.enqueue_create_buffer[DType.uint32](len(binomials))
+    var costs = ctx.enqueue_create_buffer[DType.uint64](1 << n)
+    var host_result = ctx.enqueue_create_host_buffer[DType.uint64](n + 1)
+    var device_result = ctx.enqueue_create_buffer[DType.uint64](n + 1)
+    ctx.synchronize()
+    for i in range(len(sums.low)):
+        host_sums.unsafe_ptr()[unsafe_offset=i] = sums.low[i]
+    for i in range(len(sums.high)):
+        host_sums.unsafe_ptr()[unsafe_offset=len(sums.low) + i] = sums.high[i]
+    for i in range(len(binomials)):
+        host_binomials.unsafe_ptr()[unsafe_offset=i] = binomials[i]
+    host_sums.enqueue_copy_to(device_sums)
+    host_binomials.enqueue_copy_to(device_binomials)
+    costs.enqueue_fill(0)
+    for seated in range(1, n + 1):
+        var layer_states = Int(binomials[n * (n + 1) + seated])
+        ctx.enqueue_function[gpu_kemeny_layer](
+            device_sums.unsafe_ptr(),
+            device_binomials.unsafe_ptr(),
+            costs.unsafe_ptr(),
+            Int32(n),
+            Int32(seated),
+            Int32(layer_states),
+            grid_dim=((layer_states + 255) // 256, 1, 1),
+            block_dim=(256, 1, 1),
+        )
+    ctx.enqueue_function[gpu_kemeny_trace](
+        device_sums.unsafe_ptr(),
+        costs.unsafe_ptr(),
+        device_result.unsafe_ptr(),
+        Int32(n),
+        grid_dim=(1, 1, 1),
+        block_dim=(1, 1, 1),
+    )
+    device_result.enqueue_copy_to(host_result)
+    ctx.synchronize()
+    var ranking = List[Int]()
+    for i in range(n):
+        var candidate = host_result.unsafe_ptr()[unsafe_offset=i]
+        if candidate >= UInt64(n):
+            raise Error("No candidate in the subset explains its cost, so the table is inconsistent")
+        ranking.append(Int(candidate))
+    return KemenySolution(ranking^, Int(host_result.unsafe_ptr()[unsafe_offset=n]))

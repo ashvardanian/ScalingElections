@@ -60,7 +60,7 @@ If the toolchain is missing, install it with `xcodebuild -downloadComponent Meta
 ```sh
 pixi run build   # builds the Python bindings and native CLI
 pixi run test    # cross-checks all three languages; requires `uv sync` first
-pixi run bench   # the headline problem size
+pixi run bench   # the native benchmark CLI
 ```
 
 ## What's Inside
@@ -86,14 +86,15 @@ An electorate arrives in chunks rather than whole, so only the chunk in hand is 
 
 | Variant                       | 16 candidates | 32 candidates | 64 candidates | 128 candidates |
 | :---------------------------- | ------------: | ------------: | ------------: | -------------: |
-| ScalingElections, 1x H100 GPU |     115.3 M/s |      57.4 M/s |      28.1 M/s |              — |
-| ScalingElections, 16x SPR CPU |     124.0 M/s |      32.1 M/s |       7.4 M/s |        1.7 M/s |
-| Pref-Voting, 1x SPR           |     0.044 M/s |     0.019 M/s |     0.007 M/s |      0.003 M/s |
+| ScalingElections, 132× SM90   |     115.3 M/s |      57.4 M/s |      28.1 M/s |              — |
+| ScalingElections, 16× SPR CPU |     124.0 M/s |      32.1 M/s |       7.4 M/s |        1.7 M/s |
+| Mojo, 18× M5 Pro CPU          |      48.5 M/s |      12.5 M/s |      3.17 M/s |       0.79 M/s |
+| Mojo, 20× M5 Pro GPU          |      24.1 M/s |      13.2 M/s |      6.54 M/s |              — |
+| Pref-Voting, 1× SPR           |     0.044 M/s |     0.019 M/s |     0.007 M/s |      0.003 M/s |
 |                               |               |               |               |                |
 | 350M Ballots                  |         2.8 s |         6.1 s |        12.5 s |        201.1 s |
 
-> Measured 24 August 2026.
-
+> Measured 5 October 2026.
 
 ### Schulze
 
@@ -106,15 +107,17 @@ The field can be enormous, and voters cost nothing.
   <img alt="Schulze wall clock against field size, log-log" src="assets/schulze-light.svg">
 </picture>
 
-| Variant                       |   512 candidates |    1K candidates |   4K candidates |    16K candidates |    64K candidates |
-| :---------------------------- | ---------------: | ---------------: | --------------: | ----------------: | ----------------: |
-| ScalingElections, 1x H100 GPU |  3.2 ms · 43 GCs | 7.0 ms · 152 GCs | 94 ms · 729 GCs | 2.59 s · 1.70 TCs | 60.3 s · 4.66 TCs |
-| ScalingElections, 16x SPR CPU |  2.2 ms · 60 GCs |   19 ms · 57 GCs | 1.17 s · 59 GCs |   69.8 s · 63 GCs |                 — |
-| Pref-Voting, 1x SPR           | 29.0 s · 4.6 MCs |    232 s · 5 MCs |               — |                 — |                 — |
-|                               |                  |                  |                 |                   |                   |
-| Memory Usage                  |           1.0 MB |           4.2 MB |         67.1 MB |           1.07 GB |           17.2 GB |
+| Variant                       |     512 candidates |      1K candidates |     4K candidates |    16K candidates |    64K candidates |
+| :---------------------------- | -----------------: | -----------------: | ----------------: | ----------------: | ----------------: |
+| ScalingElections, 132× SM90   |    3.2 ms · 43 GCs |   7.0 ms · 152 GCs |   94 ms · 729 GCs | 2.59 s · 1.70 TCs | 60.3 s · 4.66 TCs |
+| ScalingElections, 16× SPR CPU |    2.2 ms · 60 GCs |     19 ms · 57 GCs |   1.17 s · 59 GCs |   69.8 s · 63 GCs |                 — |
+| Mojo, 18× M5 Pro CPU          | 3.93 ms · 34.2 GCs | 22.7 ms · 47.3 GCs | 1.13 s · 60.7 GCs |   68.7 s · 64 GCs |                 — |
+| Mojo, 20× M5 Pro GPU          | 3.29 ms · 40.8 GCs |  9.49 ms · 113 GCs |  220 ms · 312 GCs |  10.3 s · 428 GCs |                 — |
+| Pref-Voting, 1× SPR           |   29.0 s · 4.6 MCs |      232 s · 5 MCs |                 — |                 — |                 — |
+|                               |                    |                    |                   |                   |                   |
+| Memory Usage                  |             1.0 MB |             4.2 MB |           67.1 MB |           1.07 GB |           17.2 GB |
 
-> Measured 24 August 2026.
+> Measured 5 October 2026.
 
 __Note that, production Schulze is tiny.__
 Debian, Wikimedia and the Pirate Parties run it over fewer than ten candidates, where the sweep is microseconds and the tally is everything.
@@ -133,12 +136,14 @@ Voters are free: the summary is the same size whether ten thousand or a billion 
 
 | Variant                       | 21 candidates | 24 candidates | 27 candidates | 30 candidates | 33 candidates |
 | :---------------------------- | ------------: | ------------: | ------------: | ------------: | ------------: |
-| ScalingElections, 1x H100 GPU |          5 ms |         18 ms |        101 ms |        727 ms |        5.86 s |
-| ScalingElections, 16x SPR CPU |         29 ms |        268 ms |        1.80 s |        16.0 s |       2.4 min |
+| ScalingElections, 132× SM90   |          5 ms |         18 ms |        101 ms |        727 ms |        5.86 s |
+| ScalingElections, 16× SPR CPU |         29 ms |        268 ms |        1.80 s |        16.0 s |       2.4 min |
+| Mojo, 18× M5 Pro CPU          |         14 ms |        120 ms |        1.12 s |          11 s |             — |
+| Mojo, 20× M5 Pro GPU          |       5.51 ms |       25.9 ms |        208 ms |        1.96 s |             — |
 |                               |               |               |               |               |               |
 | Memory Usage                  |       16.8 MB |        134 MB |       1.07 GB |       8.59 GB |       68.7 GB |
 
-> Measured 24 August 2026, both processors returning the same ranking and the same score at every width.
+> Measured 5 October 2026.
 
 __Real contests fit.__
 The 2020 Democratic primary drew 29 candidates, and the Associated Press college football poll ranks 25 teams from about 60 ballots.
@@ -149,13 +154,13 @@ __And the subset program is not the fastest way to reach the field it can.__
 Kemeny's optimum is a minimum-weight feedback arc set, and an integer program over the triangle inequalities solves that directly.
 [Pref-Voting](https://pypi.org/project/pref-voting/) reaches the same optimum a third way, by walking all $N!$ orderings, which is where its column ends:
 
-| Variant                       | 10 candidates | 21 candidates | 27 candidates | 33 candidates |
-| :---------------------------- | ------------: | ------------: | ------------: | ------------: |
-| ScalingElections, 1x H100 GPU |        0.6 ms |          5 ms |        101 ms |        5.86 s |
-| iGraph `ip_ti`, 1x SPR core   |        0.8 ms |         39 ms |        177 ms |        323 ms |
-| Pref-Voting, 1x SPR           |        22.6 s |             — |             — |             — |
+| Variant                     | 10 candidates | 21 candidates | 27 candidates | 33 candidates |
+| :-------------------------- | ------------: | ------------: | ------------: | ------------: |
+| ScalingElections, 132× SM90 |        0.6 ms |          5 ms |        101 ms |        5.86 s |
+| iGraph `ip_ti`, 1× SPR core |        0.8 ms |         39 ms |        177 ms |        323 ms |
+| Pref-Voting, 1× SPR         |        22.6 s |             — |             — |             — |
 
-> Measured 24 August 2026. All three agree on the score wherever more than one of them finishes.
+> Measured 5 October 2026.
 
 [Betzler, Bredereck and Niedermeier](https://doi.org/10.1007/s10458-013-9236-y) put the crossover near 23 candidates and report a 69-candidate instance solved exactly in under four seconds, which the table above corroborates.
 What the subset program buys is not speed but a cost that does not depend on the profile: an integer program is fast when the electorate broadly agrees and collapses when it does not, while `2^N` states cost the same either way.

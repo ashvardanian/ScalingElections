@@ -8,9 +8,10 @@ import functools
 import importlib
 import os
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "build"))
@@ -53,11 +54,7 @@ def cuda_device_ready() -> bool:
         import scalingelections_cuda as extension
     except ImportError:
         return False
-    try:
-        extension.compute_strongest_paths(np.zeros((2, 2), dtype=np.uint32), backend="gpu_serial")
-    except RuntimeError:
-        return False
-    return True
+    return "gpu" in extension.available_backends()
 
 
 def pytest_report_header() -> list[str]:
@@ -66,7 +63,7 @@ def pytest_report_header() -> list[str]:
         f"seed: {_RUN_SEED}, pin with SCALINGELECTIONS_TESTS_SEED",
         f"repetitions: {randomized_repetitions_count}, exhaustive scale: {exhaustive_scale}",
         f"cuda: {installed_module_path('scalingelections_cuda') or 'extension not built'}",
-        f"device: {'gpu_serial answers' if cuda_device_ready() else 'none visible, device cases skip'}",
+        f"device: {'CUDA device visible' if cuda_device_ready() else 'none visible, device cases skip'}",
         f"mojo: {installed_module_path('scalingelections_mojo') or 'not built, run `pixi run build-bindings`'}",
         f"oracles: pref_voting {_oracle_state('pref_voting')}, igraph {_oracle_state('igraph')}",
     ]
@@ -101,10 +98,42 @@ def gpu_ready() -> bool:
     return cuda_device_ready()
 
 
-@pytest.fixture(scope="session")
-def mojo():
-    """The Mojo extension from `build/`, skipping the case when it has not been compiled."""
-    return pytest.importorskip("scalingelections_mojo", reason="Build it with `pixi run build-bindings`")
+@dataclass(frozen=True)
+class Implementation:
+    """One execution target with the same four operations across native extensions."""
+
+    target: str
+    strongest_paths: Callable
+    kemeny_consensus: Callable
+    split_cycle: Callable
+    tally_ballots: Callable
+
+
+@pytest.fixture(scope="session", params=("cpp-cpu", "cpp-gpu", "mojo-cpu", "mojo-gpu"))
+def implementation(request) -> Implementation:
+    language, target = request.param.split("-")
+    module_name = "scalingelections_cuda" if language == "cpp" else "scalingelections_mojo"
+    module = pytest.importorskip(module_name)
+    if target not in module.available_backends():
+        pytest.skip(f"{request.param} is unavailable")
+    if language == "mojo":
+        return Implementation(
+            target,
+            *(
+                functools.partial(getattr(module, name), backend=target)
+                for name in ("strongest_paths", "kemeny_consensus", "split_cycle", "tally_ballots")
+            ),
+        )
+    paths = "gpu_serial" if target == "gpu" else "cpu_openmp"
+    consensus = "gpu_layered" if target == "gpu" else "cpu_openmp"
+    tally = "gpu_privatized" if target == "gpu" else "cpu_openmp"
+    return Implementation(
+        target,
+        functools.partial(module.compute_strongest_paths, backend=paths),
+        functools.partial(module.compute_kemeny_ranking, backend=consensus),
+        functools.partial(module.compute_split_cycle_winners, backend=paths),
+        functools.partial(module.tally_ballots, backend=tally),
+    )
 
 
 @pytest.fixture(scope="session")

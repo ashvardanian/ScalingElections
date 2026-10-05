@@ -10,8 +10,8 @@ measurements live and a chart cannot quietly disagree with the table beside it.
         --x-title "alternatives ranked" --y-title "wall clock" \
         --columns "1 K,4 K,16 K,64 K" \
         --y-ticks "10 ms=0.01,100 ms=0.1,1 s=1,10 s=10,100 s=100" \
-        --series "1x H100=0.010,0.088,2.53,59.39" \
-        --series "16x SPR=0.026,1.55,96.55,-"
+        --series "132× SM90=0.010,0.088,2.53,59.39" \
+        --series "16× SPR=0.026,1.55,96.55,-"
 
 A dash in a series marks a point that was not measured, and the line skips it.
 """
@@ -26,7 +26,7 @@ FIRST_POINT, LAST_POINT = 125.6, 864.4
 BASELINE_Y, PIXELS_PER_DECADE = 404.0, 44.0
 SANS = "ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
-SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100")
+SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#9861d6")
 
 LEGEND_FONT_SIZE = 12.5
 LEGEND_SWATCH = 11.0

@@ -274,10 +274,21 @@ static py::array_t<votes_count_t> tally_ballots_py(py::array_t<candidate_index_t
     return preferences;
 }
 
+/** Execution targets visible to this build and runtime, without launching a kernel. */
+static std::vector<std::string> available_backends() {
+    std::vector<std::string> backends {"cpu"};
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
+    int count = 0;
+    if (cudaGetDeviceCount(&count) == cudaSuccess && count > 0) backends.emplace_back("gpu");
+#endif
+    return backends;
+}
+
 PYBIND11_MODULE(scalingelections_cuda, m) {
 
     std::signal(SIGINT, signal_handler);
 
+    m.def("available_backends", &available_backends);
     m.def("log_gpus", &log_gpus);
     m.def("tally_ballots", &tally_ballots_py, //
           py::arg("rankings"), py::kw_only(), //

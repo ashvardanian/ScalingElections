@@ -13,6 +13,7 @@ of each pairwise contest, which is where every Schulze backend starts.
 from std.atomic import Atomic
 from std.memory import AddressSpace, Layout, alloc, stack_allocation, unsafe_memset_zero
 from std.random.philox import Random
+from std.sys import num_logical_cores
 
 from max.algorithm import parallelize
 from max.gpu import barrier, block_dim, block_idx, grid_dim, thread_idx
@@ -89,14 +90,16 @@ def generate_random_preferences(num_candidates: Int, num_voters: Int, seed_value
         def fill_row(row: Int) {imm}:
             # Seeded per row, so parallel workers share no state to race on.
             var generator = Random(seed=UInt64(seed_value), offset=UInt64(row))
-            var bound = UInt32(num_candidates)
+            var bound = UInt32(350_000_001)
             var column = 0
             while column < num_candidates:
                 # Every lane of the draw is spent, rather than three in four discarded.
                 var draws = generator.step()
                 var lanes = min(len(draws), num_candidates - column)
                 for lane in range(lanes):
-                    preferences.data[unsafe_offset=row * num_candidates + column + lane] = draws[lane] % bound
+                    preferences.data[unsafe_offset=row * num_candidates + column + lane] = draws[
+                        lane
+                    ] % bound if row != column + lane else UInt32(0)
                 column += lanes
 
         parallelize(fill_row, num_candidates)
@@ -218,6 +221,34 @@ def seed_graph(
 
 
 # endregion Graph
+
+
+def tally_ballots_cpu(rankings: List[UInt32], num_ballots: Int, num_candidates: Int) -> PreferenceMatrix:
+    """Counts complete rankings in parallel with one private matrix per worker."""
+    var preferences = PreferenceMatrix(num_candidates)
+    if num_ballots == 0:
+        return preferences^
+    var workers = min(num_ballots, num_logical_cores())
+    var cells = num_candidates * num_candidates
+    var counts = List[UInt32]()
+    counts.resize(workers * cells, 0)
+    var counts_ptr = counts.unsafe_ptr()
+
+    def count_chunk(worker: Int) {imm}:
+        var private_counts = counts_ptr.unsafe_offset(worker * cells)
+        for ballot in range(num_ballots * worker // workers, num_ballots * (worker + 1) // workers):
+            var base = ballot * num_candidates
+            for position in range(num_candidates - 1):
+                var preferred = Int(rankings[base + position])
+                for later in range(position + 1, num_candidates):
+                    var cell = preferred * num_candidates + Int(rankings[base + later])
+                    private_counts[unsafe_offset=cell] += 1
+
+    parallelize(count_chunk, workers)
+    for worker in range(workers):
+        for cell in range(cells):
+            preferences.data[unsafe_offset=cell] += counts[worker * cells + cell]
+    return preferences^
 
 
 comptime TALLY_MAX_CANDIDATES = 64
