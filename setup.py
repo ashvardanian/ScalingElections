@@ -1,3 +1,5 @@
+"""Build the native extension with the available CUDA, HIP, or host compiler."""
+
 import os
 import platform
 import shutil
@@ -10,7 +12,7 @@ from setuptools.command.build_ext import build_ext
 from setuptools.extension import Extension
 
 
-def cuda_home():
+def cuda_home() -> str:
     """Toolkit root of the `nvcc` on PATH, so headers and libraries match the compiler."""
     nvcc = shutil.which("nvcc")
     if nvcc:
@@ -22,7 +24,7 @@ CUDA_HOME = cuda_home()
 
 
 # Detect CUDA availability
-def has_cuda():
+def has_cuda() -> bool:
     """Check if CUDA is available."""
     # Check for nvcc
     if os.system("which nvcc > /dev/null 2>&1") != 0:
@@ -32,7 +34,7 @@ def has_cuda():
 
 
 # Detect ROCm/HIP availability
-def has_rocm():
+def has_rocm() -> bool:
     """Check if ROCm/HIP is available."""
     # Check for hipcc
     if os.system("which hipcc > /dev/null 2>&1") != 0:
@@ -49,7 +51,7 @@ def has_rocm():
 DEFAULT_CUDA_ARCHS = ("80", "89", "90", "100", "120")
 
 
-def detect_cuda_archs():
+def detect_cuda_archs() -> list[str]:
     """Compute capabilities to emit, overridable via `SCALING_ELECTIONS_CUDA_ARCH`."""
     override = os.environ.get("SCALING_ELECTIONS_CUDA_ARCH", "")
     requested = [code.strip() for code in override.split(",") if code.strip()]
@@ -77,7 +79,10 @@ python_include = sysconfig.get_paths()["include"]
 
 
 class BuildExt(build_ext):
-    def build_extensions(self):
+    """Compile the shared native sources for the installed accelerator toolkit."""
+
+    def build_extensions(self) -> None:
+        """Select the compiler for each extension and build its sources."""
         self.compiler.src_extensions.append(".cu")
         nvcc_available = self.is_nvcc_available()
         hipcc_available = self.is_hipcc_available()
@@ -93,13 +98,16 @@ class BuildExt(build_ext):
             else:
                 super().build_extension(ext)
 
-    def is_nvcc_available(self):
+    def is_nvcc_available(self) -> bool:
+        """Return whether the CUDA compiler is on PATH."""
         return os.system("which nvcc > /dev/null 2>&1") == 0
 
-    def is_hipcc_available(self):
+    def is_hipcc_available(self) -> bool:
+        """Return whether the HIP compiler is on PATH."""
         return os.system("which hipcc > /dev/null 2>&1") == 0
 
-    def build_cuda_extension(self, ext):
+    def build_cuda_extension(self, ext: Extension) -> None:
+        """Compile CUDA and host sources, then link the extension."""
         # Compile CUDA source files
         for source in ext.sources:
             if source.endswith(".cu"):
@@ -123,7 +131,8 @@ class BuildExt(build_ext):
             target_lang=ext.language,
         )
 
-    def build_hip_extension(self, ext):
+    def build_hip_extension(self, ext: Extension) -> None:
+        """Compile HIP and host sources, then link the extension."""
         # Compile HIP source files using hipcc
         for source in ext.sources:
             if source.endswith(".cu"):
@@ -147,7 +156,8 @@ class BuildExt(build_ext):
             target_lang=ext.language,
         )
 
-    def build_gcc_extension(self, ext):
+    def build_gcc_extension(self, ext: Extension) -> None:
+        """Compile and link the extension using the host C++ compiler."""
         # Compile all source files with GCC, including treating .cu files as .cpp files
         objects = []
         # Aggressive optimization flags for CPU performance
@@ -204,7 +214,8 @@ class BuildExt(build_ext):
             target_lang=ext.language,
         )
 
-    def compile_cuda(self, source):
+    def compile_cuda(self, source: str) -> None:
+        """Compile a native source for the requested CUDA architectures."""
         # Compile CUDA source file using nvcc
         ext = self.extensions[0]
         output_dir = self.build_temp
@@ -227,7 +238,8 @@ class BuildExt(build_ext):
         if os.system(cmd) != 0:
             raise RuntimeError(f"nvcc compilation of {source} failed")
 
-    def compile_hip(self, source):
+    def compile_hip(self, source: str) -> None:
+        """Compile a native source for the detected or requested HIP architectures."""
         # Compile HIP source file using hipcc
         ext = self.extensions[0]
         output_dir = self.build_temp

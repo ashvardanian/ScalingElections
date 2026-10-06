@@ -8,6 +8,7 @@ import warnings
 
 import numpy as np
 from numba import njit, prange
+from numpy.typing import NDArray
 
 from ballots import ScoreType, positive_margins
 
@@ -19,7 +20,7 @@ TILE_SIZE = 32
 """The tile edge every backend is compiled for, matching `tile_size_k` in `types.cuh`."""
 
 
-def resolve_score_type(preferences: np.ndarray, score_type: ScoreType = ScoreType.auto) -> ScoreType:
+def resolve_score_type(preferences: NDArray[np.integer], score_type: ScoreType = ScoreType.auto) -> ScoreType:
     """Select arithmetic that represents every path edge; max-min never increases its maximum."""
     score_type = ScoreType(score_type)
     if score_type is ScoreType.saturated64 and np.any(preferences == np.iinfo(np.uint64).max):
@@ -35,7 +36,7 @@ def resolve_score_type(preferences: np.ndarray, score_type: ScoreType = ScoreTyp
 
 
 @njit
-def compute_strongest_paths_serial(preferences: np.ndarray) -> np.ndarray:
+def compute_strongest_paths_serial[Scalar: np.integer](preferences: NDArray[Scalar]) -> NDArray[Scalar]:
     """
     Computes the widest path strengths using the Schulze method.
 
@@ -80,17 +81,17 @@ def compute_strongest_paths_serial(preferences: np.ndarray) -> np.ndarray:
 
 @njit
 def process_tile_cpu(
-    output: np.ndarray,
+    output: NDArray[np.integer],
     output_row: int,
     output_column: int,
-    left: np.ndarray,
+    left: NDArray[np.integer],
     left_row: int,
     left_column: int,
-    right: np.ndarray,
+    right: NDArray[np.integer],
     right_row: int,
     right_column: int,
     tile_size: int = TILE_SIZE,
-):
+) -> None:
     """
     In-place computation of the widest path path using the Schulze method with tiling for better cache utilization.
     For input of size (n x n), would perform (n) iterations of quadratic complexity each.
@@ -123,10 +124,10 @@ def process_tile_cpu(
 
 
 @njit(parallel=True)
-def compute_strongest_paths_tiled_cpu(
-    preferences: np.ndarray,
+def compute_strongest_paths_tiled_cpu[Scalar: np.integer](
+    preferences: NDArray[Scalar],
     tile_size: int = TILE_SIZE,
-) -> np.ndarray:
+) -> NDArray[Scalar]:
     """
     Computes the widest path strengths using the Schulze method with tiling for better cache utilization.
     This implementation not only parallelizes the outer loop but also tiles the computation, to maximize
@@ -238,7 +239,7 @@ def compute_strongest_paths_tiled_cpu(
 # region Winners
 
 
-def select_split_cycle_winners(preferences: np.ndarray, margin_paths: np.ndarray) -> list[int]:
+def select_split_cycle_winners(preferences: NDArray[np.integer], margin_paths: NDArray[np.integer]) -> list[int]:
     """
     Determines the Split Cycle winners, which are the candidates nobody defeats.
 
@@ -256,7 +257,7 @@ def select_split_cycle_winners(preferences: np.ndarray, margin_paths: np.ndarray
 
 def compute_election_results(
     candidates: list[int],
-    strongest_paths: np.ndarray,
+    strongest_paths: NDArray[np.integer],
 ) -> tuple[list[int], list[int]]:
     """
     Returns every undefeated candidate and a deterministic representative ranking from the strongest paths matrix.
@@ -281,6 +282,24 @@ def compute_election_results(
     ranked_candidates = [candidates[index] for index in ranking_indices]
 
     return winners, ranked_candidates
+
+
+def compute_ranking_tiers(candidates: list[int], strongest_paths: NDArray[np.integer]) -> list[list[int]]:
+    """Peel undefeated fronts; candidates in one tier need not express pairwise indifference."""
+    if strongest_paths.shape != (len(candidates), len(candidates)) or len(set(candidates)) != len(candidates):
+        raise ValueError("Distinct candidates must match the square strongest-path matrix")
+    defeats = strongest_paths > strongest_paths.T
+    remaining = np.ones(len(candidates), dtype=bool)
+    incoming = np.sum(defeats, axis=0)
+    tiers = []
+    while np.any(remaining):
+        front = np.flatnonzero(remaining & (incoming == 0))
+        if not len(front):
+            raise ValueError("Strongest-path defeats must be acyclic")
+        tiers.append([candidates[index] for index in front])
+        remaining[front] = False
+        incoming -= np.sum(defeats[front], axis=0)
+    return tiers
 
 
 # endregion Winners

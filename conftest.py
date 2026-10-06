@@ -8,14 +8,17 @@ import functools
 import importlib
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
+from numpy.typing import NDArray
 import pytest
 
 from kemeny import KemenyResult
+from ballots import PairwiseCounts
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "build"))
 
@@ -84,7 +87,7 @@ def _oracle_state(name: str) -> str:
 
 
 @pytest.fixture
-def seed(__pytest_repeat_step_number) -> int:
+def seed(__pytest_repeat_step_number: int | None) -> int:
     """A per-test seed that moves with the repeat step, so `--count` explores instead of replaying.
 
     The parameter carries no default on purpose: pytest builds a fixture's closure from the
@@ -99,14 +102,17 @@ def seed(__pytest_repeat_step_number) -> int:
 class Implementation:
     """One implementation and execution target exposing the common operations."""
 
-    tally_ballots: Callable[..., np.ndarray]
-    compute_strongest_paths: Callable[..., np.ndarray]
+    tally_ballots: Callable[..., NDArray[np.uint16 | np.uint32 | np.uint64]]
+    tally_pairwise_relations: Callable[..., PairwiseCounts]
+    compute_strongest_paths: Callable[..., NDArray[np.uint16 | np.uint32 | np.uint64]]
     compute_kemeny_ranking: Callable[..., KemenyResult]
+    enumerate_kemeny_rankings: Callable[..., Generator[list[int], None, None]]
     compute_split_cycle_winners: Callable[..., list[int]]
 
 
 @pytest.fixture(scope="session", params=("python-cpu", "cpp-cpu", "cpp-gpu", "mojo-cpu", "mojo-gpu"))
-def implementation(request) -> Implementation:
+def implementation(request: pytest.FixtureRequest) -> Implementation:
+    """Bind the shared operation contract to one available execution target."""
     language, target = request.param.split("-")
     import scalingelections as module
     from scalingelections import Backend
@@ -122,8 +128,10 @@ def implementation(request) -> Implementation:
             functools.partial(getattr(module, name), implementation=language, backend=target)
             for name in (
                 "tally_ballots",
+                "tally_pairwise_relations",
                 "compute_strongest_paths",
                 "compute_kemeny_ranking",
+                "enumerate_kemeny_rankings",
                 "compute_split_cycle_winners",
             )
         ),
@@ -131,13 +139,13 @@ def implementation(request) -> Implementation:
 
 
 @pytest.fixture(scope="session")
-def pref_voting():
+def pref_voting() -> ModuleType:
     """Eric Pacuit's reference library, whose authors defined Split Cycle."""
     return pytest.importorskip("pref_voting", reason="Install it with `uv sync --extra cpu`")
 
 
 @pytest.fixture(scope="session")
-def igraph():
+def igraph() -> ModuleType:
     """The graph library whose exact integer program stands in for Kemeny above ten candidates."""
     return pytest.importorskip("igraph", reason="Install it with `uv sync --extra cpu`")
 

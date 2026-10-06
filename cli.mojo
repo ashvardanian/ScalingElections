@@ -14,36 +14,36 @@ from max.gpu.host import DeviceContext
 import ballots
 import kemeny
 import schulze
-from ballots import Backend, UInt32VoteMatrix, ScoreType
+from ballots import Arithmetic, Backend, UInt32VoteMatrix, VoteMatrix, ScoreType
 from kemeny import KemenySolution
 
 
 def profile[
-    Result: Movable & Deinitable, Func: def() raises -> Result
-](label: String, function: Func, warmup: Int, repeat: Int, work: Float64, unit: String) raises -> Result:
+    ResultType: Movable & Deinitable, Function: def() raises -> ResultType
+](label: String, function: Function, warmup: Int, repeat: Int, work: Float64, unit: String) raises -> ResultType:
     """Times complete calls and retains the last result for validation."""
-    print("→", label)
+    print("→ {}".format(label))
     for _ in range(warmup):
         _ = function()
     var start = perf_counter_ns()
     var result = function()
     var elapsed = perf_counter_ns() - start
-    print("  sample_ns", elapsed)
+    print("  sample_ns {}".format(elapsed))
     var total = elapsed
     for _ in range(1, repeat):
         start = perf_counter_ns()
         result = function()
         elapsed = perf_counter_ns() - start
-        print("  sample_ns", elapsed)
+        print("  sample_ns {}".format(elapsed))
         total += elapsed
     var average = total // repeat
-    print("  mean_ns", average, "│", format_time(average))
+    print("  mean_ns {} │ {}".format(average, format_time(average)))
     if work > 0 and average > 0:
-        print("  rate", work * 1e9 / Float64(average), unit)
+        print("  rate {} {}".format(work * 1e9 / Float64(average), unit))
     return result^
 
 
-def check_matrix(actual: UInt32VoteMatrix, expected: UInt32VoteMatrix) raises:
+def check_matrix[CountDataType: DType](actual: VoteMatrix[CountDataType], expected: VoteMatrix[CountDataType]) raises:
     for row in range(expected.num_candidates):
         for column in range(expected.num_candidates):
             if actual[row, column] != expected[row, column]:
@@ -51,7 +51,24 @@ def check_matrix(actual: UInt32VoteMatrix, expected: UInt32VoteMatrix) raises:
     print("  ✓ Matrices match")
 
 
-def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, repeat: Int) raises:
+def run_ballots(
+    n: Int, voters: Int, seed: Int, selector: String, warmup: Int, repeat: Int, requested: ScoreType
+) raises:
+    var score_type = ballots.resolve_tally_score_type(UInt64(voters), requested)
+    print("Score bits: {}".format(score_type.width()))
+    if score_type == ScoreType.uint16:
+        run_ballots_typed[DType.uint16, Arithmetic.exact](n, voters, seed, selector, warmup, repeat)
+    elif score_type == ScoreType.uint32:
+        run_ballots_typed[DType.uint32, Arithmetic.exact](n, voters, seed, selector, warmup, repeat)
+    elif score_type == ScoreType.uint64:
+        run_ballots_typed[DType.uint64, Arithmetic.exact](n, voters, seed, selector, warmup, repeat)
+    else:
+        run_ballots_typed[DType.uint64, Arithmetic.saturated](n, voters, seed, selector, warmup, repeat)
+
+
+def run_ballots_typed[
+    ArithmeticDataType: DType, ArithmeticMode: Arithmetic
+](n: Int, voters: Int, seed: Int, selector: String, warmup: Int, repeat: Int) raises:
     var rankings = List[UInt32]()
     rankings.resize(n * voters, 0)
     var generator = Random(seed=UInt64(seed))
@@ -65,7 +82,11 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
             rankings[base + upper] = rankings[base + chosen]
             rankings[base + chosen] = held
 
-    var baseline = UInt32VoteMatrix(0)
+    var offsets = List[ballots.BallotOffset]()
+    comptime if ArithmeticDataType != DType.uint32:
+        for ballot in range(voters + 1):
+            offsets.append(UInt64(ballot) * UInt64(n))
+    var baseline = VoteMatrix[ArithmeticDataType](0)
     var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     for backend in backends:
         if not selected_by(selector, backend.name()):
@@ -74,10 +95,26 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
             print("GPU unavailable")
             continue
 
-        def calculate() raises {imm} -> UInt32VoteMatrix:
-            return ballots.tally_ballots(rankings, voters, n, backend=backend)
+        def calculate() raises {imm} -> VoteMatrix[ArithmeticDataType]:
+            comptime if ArithmeticDataType == DType.uint32:
+                return rebind_var[VoteMatrix[ArithmeticDataType]](
+                    ballots.tally_ballots(ballots.ballot_span(rankings), voters, n, backend=backend)
+                )
+            else:
+                var prepared = ballots.RaggedBallots(
+                    ballots.ballot_span(rankings),
+                    ballots.ballot_span(offsets),
+                    Span[ballots.RankLabel, ImmUntrackedOrigin](),
+                    Span[ballots.VoterWeight, ImmUntrackedOrigin](),
+                    Span[ballots.PolicyCode, ImmUntrackedOrigin](),
+                    n,
+                    ballots.Unranked.unknown,
+                )
+                return ballots.tally_ragged_ballots[ArithmeticDataType, ArithmeticMode](prepared, backend=backend)
 
-        var result = profile[UInt32VoteMatrix](backend.name(), calculate, warmup, repeat, Float64(voters), "ballots/s")
+        var result = profile[VoteMatrix[ArithmeticDataType]](
+            backend.name(), calculate, warmup, repeat, Float64(voters), "ballots/s"
+        )
         for row in range(n):
             if result[row, row] != 0:
                 raise Error("Nonzero tally diagonal")
@@ -88,6 +125,8 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
             check_matrix(result, baseline)
         else:
             baseline = result^
+    _ = rankings^
+    _ = offsets^
     if baseline.num_candidates == 0:
         raise Error("No selected backend could run")
 
@@ -95,8 +134,20 @@ def run_ballots(n: Int, voters: Int, seed: Int, selector: String, warmup: Int, r
 def run_schulze(
     preferences: UInt32VoteMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType
 ) raises:
-    print("Score bits:", schulze.resolve_score_type(preferences, score_type).width())
-    var baseline = UInt32VoteMatrix(0)
+    var resolved = schulze.resolve_score_type(preferences.view(), score_type)
+    print("Score bits: {}".format(resolved.width()))
+    if resolved == ScoreType.uint16:
+        run_schulze_typed[DType.uint16](preferences, selector, warmup, repeat)
+    elif resolved == ScoreType.uint32:
+        run_schulze_typed[DType.uint32](preferences, selector, warmup, repeat)
+    else:
+        run_schulze_typed[DType.uint64](preferences, selector, warmup, repeat)
+
+
+def run_schulze_typed[
+    ArithmeticDataType: DType
+](preferences: UInt32VoteMatrix, selector: String, warmup: Int, repeat: Int) raises:
+    var baseline = VoteMatrix[ArithmeticDataType](0)
     var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     var n = preferences.num_candidates
     for backend in backends:
@@ -106,26 +157,30 @@ def run_schulze(
             print("GPU unavailable")
             continue
 
-        def calculate() raises {imm} -> UInt32VoteMatrix:
-            return schulze.compute_strongest_paths(preferences, backend=backend, score_type=score_type)
+        def calculate() raises {imm} -> VoteMatrix[ArithmeticDataType]:
+            return schulze.strongest_paths_typed[ArithmeticDataType, ballots.SeedGraph.winning_votes](
+                preferences.view(), backend
+            )
 
-        var result = profile[UInt32VoteMatrix](backend.name(), calculate, warmup, repeat, Float64(n) ** 3, "cells/s")
+        var result = profile[VoteMatrix[ArithmeticDataType]](
+            backend.name(), calculate, warmup, repeat, Float64(n) ** 3, "cells/s"
+        )
         if baseline.num_candidates:
             check_matrix(result, baseline)
         else:
             baseline = result^
     if baseline.num_candidates == 0:
         raise Error("No selected backend could run")
-    var outcome = schulze.compute_election_results(baseline)
+    var outcome = schulze.compute_election_results(baseline.view())
     var top = List[Int]()
     for place in range(min(5, len(outcome.ranking))):
         top.append(outcome.ranking[place])
-    print("Winners:", outcome.winners, "Top candidates:", top)
+    print("Winners: {} Top candidates: {}".format(outcome.winners, top))
 
 
 def run_kemeny(preferences: UInt32VoteMatrix, selector: String, warmup: Int, repeat: Int, score_type: ScoreType) raises:
-    print("Score bits:", kemeny.resolve_score_type(preferences, score_type).width())
-    var baseline = KemenySolution(List[Int](), List[Int](), True, 0)
+    print("Score bits: {}".format(kemeny.resolve_score_type(preferences.view(), score_type).width()))
+    var baseline = KemenySolution(List[Int](), List[Int](), kemeny.RankingMultiplicity.unique, 0)
     var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     var n = preferences.num_candidates
     for backend in backends:
@@ -136,7 +191,7 @@ def run_kemeny(preferences: UInt32VoteMatrix, selector: String, warmup: Int, rep
             continue
 
         def calculate() raises {imm} -> KemenySolution:
-            var result = kemeny.compute_kemeny_ranking(preferences, backend=backend, score_type=score_type)
+            var result = kemeny.compute_kemeny_ranking(preferences.view(), backend=backend, score_type=score_type)
             if result.score == UInt64.MAX:
                 raise Error("Kemeny optimum reached the saturation sentinel")
             return result^
@@ -158,7 +213,7 @@ def run_kemeny(preferences: UInt32VoteMatrix, selector: String, warmup: Int, rep
                 result.score != baseline.score
                 or result.ranking != baseline.ranking
                 or result.winners != baseline.winners
-                or result.unique != baseline.unique
+                or result.multiplicity != baseline.multiplicity
             ):
                 raise Error("Backend Kemeny results disagree")
             print("  ✓ Rankings and scores match")
@@ -166,9 +221,8 @@ def run_kemeny(preferences: UInt32VoteMatrix, selector: String, warmup: Int, rep
             baseline = result^
     if not len(baseline.ranking):
         raise Error("No selected backend could run")
-    print(
-        "Score:", baseline.score, "Ranking:", baseline.ranking, "Winners:", baseline.winners, "Unique:", baseline.unique
-    )
+    print("Score: {} Ranking: {}".format(baseline.score, baseline.ranking))
+    print("Winners: {} Multiplicity: {}".format(baseline.winners, baseline.multiplicity.name()))
 
 
 def format_time(elapsed_ns: Int) -> String:
@@ -272,7 +326,7 @@ comptime USAGE = """Usage: scalingelections [OPTIONS]
   --warmup N           Warmup iterations (default: 1)
   --repeat N           Measured iterations (default: 1)
   --seed N             Reproducible input seed (default: 42)
-  --score-bits TYPE    Solver arithmetic: auto, uint16, uint32, uint64, or saturated64 (default: auto)
+  --score-bits TYPE    Tally/solver arithmetic: auto, uint16, uint32, uint64, or saturated64 (default: auto)
   --help, -h           Show help
 """
 
@@ -297,19 +351,17 @@ def main() raises:
         raise Error("Candidates and repeat must be positive; voters and warmup cannot be negative")
     if method != "ballots" and method != "schulze" and method != "kemeny":
         raise Error("--method must be ballots, schulze, or kemeny")
-    if method == "ballots" and has_flag(args, "--score-bits"):
-        raise Error("--score-bits applies only to Schulze and Kemeny")
     if method == "ballots" and voters == 0:
         raise Error("--num-voters must be positive for ballot benchmarks")
     if method == "kemeny" and n > 33:
         raise Error("Kemeny supports at most 33 candidates")
-    print("Method:", method, "Candidates:", n, "Voters:", voters, "Seed:", seed)
-    print("Warmup:", warmup, "Repeat:", repeat, "CPU threads:", num_logical_cores())
+    print("Method: {} Candidates: {} Voters: {} Seed: {}".format(method, n, voters, seed))
+    print("Warmup: {} Repeat: {} CPU threads: {}".format(warmup, repeat, num_logical_cores()))
     if selected_by(selector, "GPU") and has_accelerator():
         var ctx = DeviceContext()
-        print("GPU:", ctx.name())
+        print("GPU: {}".format(ctx.name()))
     if method == "ballots":
-        run_ballots(n, voters, seed, selector, warmup, repeat)
+        run_ballots(n, voters, seed, selector, warmup, repeat, score_type)
         return
     var preferences = ballots.generate_random_preferences(n, voters, seed)
     var solvers = StringDict[def(UInt32VoteMatrix, String, Int, Int, ScoreType) raises thin -> None]()

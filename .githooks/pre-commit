@@ -1,6 +1,101 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+reject_source() {
+    printf '%s:%s: %s\n' "$source_path" "$source_line" "$1" >&2
+    status=1
+}
+
+check_ceiling_divisions() {
+    local rest=$1 expression addition divisor
+    local pattern='\(([^();]+)\+[[:space:]]*([^();]+)\)[[:space:]]*/{1,2}[[:space:]]*([[:alnum:]_]+)'
+    while [[ $rest =~ $pattern ]]; do
+        expression=${BASH_REMATCH[0]}
+        addition=${BASH_REMATCH[2]//[[:space:]]/}
+        divisor=${BASH_REMATCH[3]}
+        if [[ $addition == "$divisor-1" || $addition == "$divisor-1u" ]]; then
+            reject_source 'Use divide_round_up(value, divisor)'
+        elif [[ $addition =~ ^[0-9]+$ && $divisor =~ ^[0-9]+$ ]] &&
+             ((${#addition} < 10 && ${#divisor} < 10 && 10#$addition + 1 == 10#$divisor)); then
+            reject_source 'Use divide_round_up(value, divisor)'
+        fi
+        rest=${rest#*"$expression"}
+    done
+}
+
+check_atomic_orders() {
+    local rest=$1 name prefix call depth character receiver
+    local legacy='(^|[^[:alnum:]_])(atomic(Add|Sub|Or|And|Xor|CAS|Exch|Min|Max|Inc|Dec)(_block|_system)?|__sync_[[:alnum:]_]+)[[:space:]]*\('
+    local operation='(^|[^[:alnum:]_])(((__hip_|__)?atomic_)?(fetch_[[:alnum:]_]+|compare_exchange_[[:alnum:]_]+|exchange|load|store|test_and_set|clear|wait|thread_fence|signal_fence))[[:space:]]*(\[[^]]*\])?[[:space:]]*\('
+    local order='memory_order|__ATOMIC_|ordering[[:space:]]*='
+    if [[ $rest =~ $legacy ]]; then
+        reject_source 'Use scoped atomics with explicit memory ordering'
+    fi
+    while [[ $rest =~ $operation ]]; do
+        prefix=${BASH_REMATCH[0]}
+        name=${BASH_REMATCH[2]}
+        receiver=${rest%%"$prefix"*}
+        rest=${rest#*"$prefix"}
+        call=$prefix
+        depth=1
+        while [[ -n $rest ]] && ((depth)); do
+            character=${rest:0:1}
+            rest=${rest:1}
+            call+=$character
+            case $character in
+                '(') depth=$((depth + 1)) ;;
+                ')') depth=$((depth - 1)) ;;
+            esac
+        done
+        case $name in
+            load|store|clear|wait)
+                [[ $receiver =~ (^|[^[:alnum:]_])($atomic_names)$ || $receiver == *Atomic ]] || continue ;;
+        esac
+        [[ $call =~ $order ]] || reject_source 'Spell out the atomic memory order'
+    done
+}
+
+check_source() {
+    local source_path=$1 source_line=0 line text='' declaration name
+    local block_comment=0 opens closes atomic_names='__no_atomic_object__'
+    local quoted="\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'"
+    local block='/\*.*\*/'
+    local atomic='atomic(_ref)?[[:space:]]*<[^;{}]+>[[:space:]]+([[:alnum:]_]+)|atomic_flag[[:space:]]+([[:alnum:]_]+)'
+    while IFS= read -r line || [[ -n $line ]]; do
+        source_line=$((source_line + 1))
+        if ((block_comment)); then
+            [[ $line == *'*/'* ]] || continue
+            line=${line#*'*/'}
+            block_comment=0
+        fi
+        while [[ $line =~ $quoted ]]; do line=${line/"${BASH_REMATCH[0]}"/ }; done
+        while [[ $line =~ $block ]]; do line=${line/"${BASH_REMATCH[0]}"/ }; done
+        case $source_path in
+            *.mojo) line=${line%%#*} ;;
+            *) line=${line%%//*} ;;
+        esac
+        if [[ $line == *'/*'* ]]; then
+            line=${line%%'/*'*}
+            block_comment=1
+        fi
+        text+=" $line"
+        opens=${text//[^(]/}
+        closes=${text//[^)]/}
+        ((${#opens} <= ${#closes})) || continue
+        declaration=$text
+        while [[ $declaration =~ $atomic ]]; do
+            name=${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}
+            atomic_names+="|$name"
+            declaration=${declaration#*"${BASH_REMATCH[0]}"}
+        done
+        local implicit="(\+\+|--)[[:space:]]*($atomic_names)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])($atomic_names)[[:space:]]*(\+\+|--|[+|&^-]=)"
+        [[ ! $text =~ $implicit ]] || reject_source 'Use an explicit atomic operation and memory order'
+        check_ceiling_divisions "$text"
+        check_atomic_orders "$text"
+        text=''
+    done < "$source_path"
+}
+
 root=$(git rev-parse --show-toplevel)
 snapshot=$(mktemp -d)
 trap 'rm -rf "$snapshot"' EXIT
@@ -39,5 +134,7 @@ fi
 if ((${#toml_files[@]})); then
     (cd "$snapshot" && taplo format --check) || status=1
 fi
+for path in "${cpp_files[@]}"; do check_source "$path"; done
+for path in "${mojo_files[@]}"; do check_source "$snapshot/$path"; done
 git diff --cached --check || status=1
 exit "$status"

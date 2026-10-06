@@ -12,6 +12,7 @@
 #include <cstdlib> // `std::rand`
 
 #include <algorithm>   // `std::min`, `std::max`, `std::reverse`
+#include <span>        // `std::span`
 #include <bit>         // `std::countr_zero`
 #include <limits>      // `std::numeric_limits`
 #include <numeric>     // `std::accumulate`
@@ -60,7 +61,8 @@
 // A device compiler needs libcu++'s `mdspan`, which carries the `__device__` markers; a host-only
 // build takes the standard one where the library has it, and falls back to libcu++ where it does not.
 #if defined(SCALING_ELECTIONS_WITH_CUDA) || !defined(__cpp_lib_mdspan)
-#include <cuda/std/mdspan>
+#include <cuda/std/mdspan> // `cuda::std::mdspan`, `cuda::std::layout_stride`
+#include <cuda/std/span>   // `cuda::std::span`
 namespace shaped = cuda::std;
 #else
 #include <mdspan>
@@ -68,13 +70,14 @@ namespace shaped = std;
 #endif
 
 #if defined(SCALING_ELECTIONS_WITH_CUDA) && !defined(SCALING_ELECTIONS_WITH_HIP)
-#include <cuda.h> // `CUtensorMap`
-#include <cuda/barrier>
-#include <cudaTypedefs.h> // `PFN_cuTensorMapEncodeTiled`
-#include <cuda_runtime.h>
+#include <cuda.h>         // `CUtensorMap`
+#include <cuda/barrier>   // `cuda::barrier`, `cuda::device::barrier_arrive_tx`
+#include <cuda/atomic>    // `cuda::atomic_ref`, `cuda::memory_order_relaxed`, `cuda::thread_scope`
+#include <cudaTypedefs.h> // `PFN_cuTensorMapEncodeTiled_v12000`, `PFN_cuGetProcAddress_v12000`
+#include <cuda_runtime.h> // `cudaMallocManaged`, `cudaFree`, `cudaDeviceProp`, `cudaError_t`
 
 #elif defined(SCALING_ELECTIONS_WITH_HIP)
-#include <hip/hip_runtime.h>
+#include <hip/hip_runtime.h> // `hipMallocManaged`, `hipFree`, `hipDeviceProp_t`, `hipError_t`
 
 #if defined(__HIP_PLATFORM_AMD__)
 #define cudaError_t              hipError_t
@@ -168,6 +171,13 @@ struct std::numeric_limits<saturated<count_type_>> : std::numeric_limits<count_t
     }
 };
 
+/** @brief Unsigned integer arithmetic with 2 to 64 value bits. */
+template <typename scalar_type_>
+concept tally_arithmetic = std::numeric_limits<scalar_type_>::is_integer &&
+                           !std::numeric_limits<scalar_type_>::is_signed &&
+                           (std::numeric_limits<scalar_type_>::digits > 1) &&
+                           (std::numeric_limits<scalar_type_>::digits <= 64);
+
 inline std::size_t checked_product(std::size_t count, std::size_t width) {
     if (width && count > std::numeric_limits<std::size_t>::max() / width)
         throw std::overflow_error("Allocation size exceeds the addressable range");
@@ -175,21 +185,54 @@ inline std::size_t checked_product(std::size_t count, std::size_t width) {
 }
 
 #if defined(SCALING_ELECTIONS_WITH_CUDA)
-__device__ inline void atomic_add(std::uint32_t* counter, std::uint32_t value) { atomicAdd(counter, value); }
-__device__ inline void atomic_add(std::uint64_t* counter, std::uint64_t value) {
-    atomicAdd(reinterpret_cast<unsigned long long*>(counter), static_cast<unsigned long long>(value));
+enum class atomic_scope_t { block_k, device_k };
+
+// Barriers and kernel completion publish these counters; their updates need no ordering.
+template <atomic_scope_t scope_, typename count_type_>
+__device__ inline void atomic_add_relaxed(count_type_* counter, count_type_ value) {
+#if defined(SCALING_ELECTIONS_WITH_HIP)
+    constexpr int scope = scope_ == atomic_scope_t::block_k ? __HIP_MEMORY_SCOPE_WORKGROUP : __HIP_MEMORY_SCOPE_AGENT;
+    __hip_atomic_fetch_add(counter, value, __ATOMIC_RELAXED, scope);
+#else
+    constexpr auto scope = scope_ == atomic_scope_t::block_k ? cuda::thread_scope_block : cuda::thread_scope_device;
+    cuda::atomic_ref<count_type_, scope>(*counter).fetch_add(value, cuda::memory_order_relaxed);
+#endif
 }
-__device__ inline void atomic_add(saturated<std::uint64_t>* counter, saturated<std::uint64_t> value) {
-    auto* word = reinterpret_cast<unsigned long long*>(&counter->value);
-    unsigned long long observed = atomicCAS(word, 0ull, 0ull);
-    unsigned long long previous;
-    do {
-        previous = observed;
-        auto const sum = saturated<std::uint64_t>(previous) + value;
-        observed = atomicCAS(word, previous, static_cast<unsigned long long>(sum.value));
-    } while (previous != observed);
+
+template <atomic_scope_t scope_>
+__device__ inline void atomic_or_relaxed(std::uint32_t* counter, std::uint32_t value) {
+#if defined(SCALING_ELECTIONS_WITH_HIP)
+    constexpr int scope = scope_ == atomic_scope_t::block_k ? __HIP_MEMORY_SCOPE_WORKGROUP : __HIP_MEMORY_SCOPE_AGENT;
+    __hip_atomic_fetch_or(counter, value, __ATOMIC_RELAXED, scope);
+#else
+    constexpr auto scope = scope_ == atomic_scope_t::block_k ? cuda::thread_scope_block : cuda::thread_scope_device;
+    cuda::atomic_ref<std::uint32_t, scope>(*counter).fetch_or(value, cuda::memory_order_relaxed);
+#endif
+}
+
+template <atomic_scope_t scope_>
+__device__ inline void atomic_add_relaxed(saturated<std::uint64_t>* counter, saturated<std::uint64_t> value) {
+#if defined(SCALING_ELECTIONS_WITH_HIP)
+    constexpr int scope = scope_ == atomic_scope_t::block_k ? __HIP_MEMORY_SCOPE_WORKGROUP : __HIP_MEMORY_SCOPE_AGENT;
+    auto* word = &counter->value;
+    auto observed = __hip_atomic_load(word, __ATOMIC_RELAXED, scope);
+    while (!__hip_atomic_compare_exchange_weak(word, &observed, (saturated<std::uint64_t>(observed) + value).value,
+                                               __ATOMIC_RELAXED, __ATOMIC_RELAXED, scope)) {}
+#else
+    constexpr auto scope = scope_ == atomic_scope_t::block_k ? cuda::thread_scope_block : cuda::thread_scope_device;
+    cuda::atomic_ref<std::uint64_t, scope> word(counter->value);
+    auto observed = word.load(cuda::memory_order_relaxed);
+    while (!word.compare_exchange_weak(observed, (saturated<std::uint64_t>(observed) + value).value,
+                                       cuda::memory_order_relaxed, cuda::memory_order_relaxed)) {}
+#endif
 }
 #endif
+
+template <typename integer_type_>
+SCALING_ELECTIONS_HOST_DEVICE constexpr integer_type_ divide_round_up(
+    integer_type_ value, std::type_identity_t<integer_type_> divisor) noexcept {
+    return value / divisor + (value % divisor != 0);
+}
 
 #pragma region Shaped Views
 

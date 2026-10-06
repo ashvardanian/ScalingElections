@@ -11,7 +11,7 @@ measurements live and a chart cannot quietly disagree with the table beside it.
         --columns "1 K,4 K,16 K,64 K" \
         --y-ticks "10 ms=0.01,100 ms=0.1,1 s=1,10 s=10,100 s=100" \
         --series "132× SM90=0.010,0.088,2.53,59.39" \
-        --series "16× SPR=0.026,1.55,96.55,-"
+        --series "16× Xeon4=0.026,1.55,96.55,-"
 
 A dash in a series marks a point that was not measured, and the line skips it.
 """
@@ -26,7 +26,15 @@ FIRST_POINT, LAST_POINT = 125.6, 864.4
 BASELINE_Y, PIXELS_PER_DECADE = 404.0, 44.0
 SANS = "ui-sans-serif,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
-SERIES_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#9861d6", "#c64f68", "#8c7853")
+SERIES_COLORS = (
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#9861d6",
+    "#c64f68",
+    "#8c7853",
+)
 
 LEGEND_FONT_SIZE = 12.5
 LEGEND_SWATCH = 11.0
@@ -44,8 +52,20 @@ def text_width(text: str, font_size: float) -> float:
 
 
 THEMES = {
-    "light": {"page": "#fcfcfb", "title": "#0b0b0b", "muted": "#52514e", "grid": "#e7e6e2", "tick": "#8a8984"},
-    "dark": {"page": "#1a1a19", "title": "#ffffff", "muted": "#c3c2b7", "grid": "#2e2e2c", "tick": "#8a8980"},
+    "light": {
+        "page": "#fcfcfb",
+        "title": "#0b0b0b",
+        "muted": "#52514e",
+        "grid": "#e7e6e2",
+        "tick": "#8a8984",
+    },
+    "dark": {
+        "page": "#1a1a19",
+        "title": "#ffffff",
+        "muted": "#c3c2b7",
+        "grid": "#2e2e2c",
+        "tick": "#8a8980",
+    },
 }
 
 
@@ -65,6 +85,7 @@ def series_argument(text: str) -> tuple[str, list[float | None]]:
 
 
 def render(options: argparse.Namespace, theme: str) -> str:
+    """Render the supplied measurements and labels as a themed SVG chart."""
     palette = THEMES[theme]
     ticks = labelled_pairs(options.y_ticks)
     floor = min(value for _, value in ticks)
@@ -88,9 +109,11 @@ def render(options: argparse.Namespace, theme: str) -> str:
     height = HEIGHT + 22 * (len(legend_rows) - 1)
 
     def y_of(value: float) -> float:
+        """Map a positive measurement onto the logarithmic vertical axis."""
         return BASELINE_Y - (math.log10(value) - math.log10(floor)) * PIXELS_PER_DECADE
 
     def x_of(index: int) -> float:
+        """Place a measurement column on the horizontal axis."""
         return FIRST_POINT + index * spacing
 
     parts = [
@@ -158,15 +181,27 @@ def render(options: argparse.Namespace, theme: str) -> str:
 
 
 def main() -> None:
+    """Write light and dark charts from command-line measurements."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
-    parser.add_argument("name", help="Basename for the pair, written as <name>-light.svg and <name>-dark.svg")
+    parser.add_argument(
+        "name",
+        help="Basename for the pair, written as <name>-light.svg and <name>-dark.svg",
+    )
     parser.add_argument("--title", required=True)
     parser.add_argument("--subtitle", required=True)
     parser.add_argument("--alt", required=True, help="Accessible description of the whole chart")
     parser.add_argument("--x-title", required=True)
     parser.add_argument("--y-title", required=True)
-    parser.add_argument("--columns", required=True, help="Comma-separated tick labels along the horizontal axis")
-    parser.add_argument("--y-ticks", required=True, help="Comma-separated `label=value` pairs, log scale")
+    parser.add_argument(
+        "--columns",
+        required=True,
+        help="Comma-separated tick labels along the horizontal axis",
+    )
+    parser.add_argument(
+        "--y-ticks",
+        required=True,
+        help="Comma-separated `label=value` pairs, log scale",
+    )
     parser.add_argument(
         "--series",
         required=True,

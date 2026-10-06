@@ -659,7 +659,7 @@ void sweep_narrow_(strided_matrix<std::uint16_t>) {
 #endif
 
 /** Runs every pivot step on the 32-bit graph, using TMA when a tensor map is available. */
-template <std::uint32_t tile_size_, typename arithmetic_type_>
+template <std::uint32_t tile_size_, tally_arithmetic arithmetic_type_>
 void sweep_wide_(strided_matrix<arithmetic_type_> graph, tma_descriptor_t const& tma) {
     candidate_index_t const tiles_count = graph.extent(0) / tile_size_;
     dim3 const tile_shape(tile_size_, tile_size_, 1);
@@ -678,7 +678,7 @@ void sweep_wide_(strided_matrix<arithmetic_type_> graph, tma_descriptor_t const&
 
 /** How many blocks a flat pass over @p cells needs, capped so the grid stays resident. */
 inline std::uint32_t flat_blocks_(std::size_t cells, std::uint32_t threads_per_block) {
-    std::size_t const needed = (cells + threads_per_block - 1) / threads_per_block;
+    std::size_t const needed = divide_round_up(cells, threads_per_block);
     return static_cast<std::uint32_t>(std::min<std::size_t>(needed, 4096));
 }
 
@@ -713,7 +713,7 @@ inline void widen_graph_(std::size_t cells, std::uint16_t const* narrow, std::ui
  *  On sm_90, safe 16-bit graphs use packed min-max; wider graphs use TMA.
  *  Other devices use the ordinary tiled sweep.
  */
-template <std::uint32_t tile_size_, typename arithmetic_type_ = default_schulze_arithmetic_t,
+template <std::uint32_t tile_size_, tally_arithmetic arithmetic_type_ = default_schulze_arithmetic_t,
           typename stored_count_type_ = default_stored_count_t>
 void compute_strongest_paths_gpu(strided_matrix<stored_count_type_ const> preferences,
                                  strided_matrix<arithmetic_type_> graph,
@@ -780,7 +780,7 @@ void compute_strongest_paths_gpu(strided_matrix<stored_count_type_ const> prefer
  *  Tile @p paths is the output, @p to_pivot and @p from_pivot the inputs, and @p origin places all
  *  three in the global matrix. Every cell is walked serially, so an aliased phase needs no barrier.
  */
-template <std::uint32_t tile_size_, tile_phase_t phase_, typename arithmetic_type_>
+template <std::uint32_t tile_size_, tile_phase_t phase_, tally_arithmetic arithmetic_type_>
 inline void process_tile_openmp_(                                     //
     votes_count_tile<tile_size_, arithmetic_type_>& paths,            //
     votes_count_tile<tile_size_, arithmetic_type_> const& to_pivot,   //
@@ -852,7 +852,7 @@ inline void process_tile_openmp_(                                     //
 
 /** Stages the tile whose top-left corner @p source names into @p target , zero-filling any tail. */
 template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k,
-          typename arithmetic_type_ = default_schulze_arithmetic_t>
+          tally_arithmetic arithmetic_type_ = default_schulze_arithmetic_t>
 void memcpy2d(strided_matrix<arithmetic_type_> source, votes_count_tile<tile_size_, arithmetic_type_>& target) {
     using arithmetic_t = arithmetic_type_;
 
@@ -886,7 +886,7 @@ void memcpy2d(strided_matrix<arithmetic_type_> source, votes_count_tile<tile_siz
 
 /** Writes @p source back over the tile whose top-left corner @p target names, dropping any tail. */
 template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k,
-          typename arithmetic_type_ = default_schulze_arithmetic_t>
+          tally_arithmetic arithmetic_type_ = default_schulze_arithmetic_t>
 void memcpy2d(votes_count_tile<tile_size_, arithmetic_type_> const& source, strided_matrix<arithmetic_type_> target) {
     using arithmetic_t = arithmetic_type_;
 
@@ -929,7 +929,7 @@ void memcpy2d(votes_count_tile<tile_size_, arithmetic_type_> const& source, stri
  *  @param[in] seed Which graph the sweep closes over.
  */
 template <std::uint32_t tile_size_, tile_march_t march_ = tile_march_t::fast_k,
-          typename arithmetic_type_ = default_schulze_arithmetic_t,
+          tally_arithmetic arithmetic_type_ = default_schulze_arithmetic_t,
           typename stored_count_type_ = default_stored_count_t>
 void compute_strongest_paths_tiled_cpu( //
     strided_matrix<stored_count_type_ const> preferences, strided_matrix<arithmetic_type_> graph,
@@ -940,7 +940,7 @@ void compute_strongest_paths_tiled_cpu( //
 
     // Time for the actual core implementation
     candidate_index_t const num_candidates = preferences.extent(0);
-    candidate_index_t const tiles_count = (num_candidates + tile_size_ - 1) / tile_size_;
+    candidate_index_t const tiles_count = divide_round_up(num_candidates, tile_size_);
     for (candidate_index_t pivot_tile = 0; pivot_tile < tiles_count; pivot_tile++) {
 
         if (cancelled && *cancelled) throw std::runtime_error("Stopped by signal");

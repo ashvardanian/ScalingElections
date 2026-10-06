@@ -40,34 +40,34 @@
 <circle cx="495.0" cy="299.3" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="679.7" cy="224.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="864.4" cy="147.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"/>
-<path d="M125.6,379.7 L310.3,345.3 L495.0,270.2 L679.7,190.3" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="125.6" cy="379.7" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="310.3" cy="345.3" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="495.0" cy="270.2" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="679.7" cy="190.3" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
-<path d="M125.6,371.5 L310.3,361.3 L495.0,301.4 L679.7,227.6" fill="none" stroke="#9861d6" stroke-width="2" stroke-linejoin="round"/>
-<circle cx="125.6" cy="371.5" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="310.3" cy="361.3" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="495.0" cy="301.4" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="679.7" cy="227.6" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,373.2 L310.3,341.5 L495.0,265.0 L679.7,187.8" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="373.2" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="310.3" cy="341.5" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="495.0" cy="265.0" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="679.7" cy="187.8" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"/>
+<path d="M125.6,388.5 L310.3,366.0 L495.0,298.1 L679.7,224.7" fill="none" stroke="#9861d6" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="125.6" cy="388.5" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="310.3" cy="366.0" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="495.0" cy="298.1" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="679.7" cy="224.7" r="4" fill="#9861d6" stroke="#fcfcfb" stroke-width="2"/>
 <path d="M125.6,207.7 L310.3,167.9" fill="none" stroke="#c64f68" stroke-width="2" stroke-linejoin="round"/>
 <circle cx="125.6" cy="207.7" r="4" fill="#c64f68" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="310.3" cy="167.9" r="4" fill="#c64f68" stroke="#fcfcfb" stroke-width="2"/>
 <path d="M125.6,222.0 L310.3,182.4" fill="none" stroke="#8c7853" stroke-width="2" stroke-linejoin="round"/>
 <circle cx="125.6" cy="222.0" r="4" fill="#8c7853" stroke="#fcfcfb" stroke-width="2"/>
 <circle cx="310.3" cy="182.4" r="4" fill="#8c7853" stroke="#fcfcfb" stroke-width="2"/>
-<circle cx="200.1" cy="472" r="4" fill="#2a78d6"/>
-<text x="211.1" y="476" font-size="12.5" fill="#52514e">132× SM90 GPU</text>
-<circle cx="325.1" cy="472" r="4" fill="#eb6834"/>
-<text x="336.1" y="476" font-size="12.5" fill="#52514e">16× SPR CPU</text>
-<circle cx="432.4" cy="472" r="4" fill="#1baf7a"/>
-<text x="443.4" y="476" font-size="12.5" fill="#52514e">18× SM103 GPU</text>
-<circle cx="557.4" cy="472" r="4" fill="#eda100"/>
-<text x="568.4" y="476" font-size="12.5" fill="#52514e">18× M5 Pro CPU</text>
-<circle cx="686.7" cy="472" r="4" fill="#9861d6"/>
-<text x="697.7" y="476" font-size="12.5" fill="#52514e">20× M5 Pro GPU</text>
-<circle cx="317.7" cy="494" r="4" fill="#c64f68"/>
-<text x="328.7" y="498" font-size="12.5" fill="#52514e">Pref-Voting, 1× SPR CPU</text>
-<circle cx="497.1" cy="494" r="4" fill="#8c7853"/>
-<text x="508.1" y="498" font-size="12.5" fill="#52514e">Pref-Voting, 1× M5 Pro CPU</text>
+<circle cx="193.2" cy="472" r="4" fill="#2a78d6"/>
+<text x="204.2" y="476" font-size="12.5" fill="#52514e">132× SM90 GPU</text>
+<circle cx="318.2" cy="472" r="4" fill="#eb6834"/>
+<text x="329.2" y="476" font-size="12.5" fill="#52514e">16× Xeon4 CPU</text>
+<circle cx="439.3" cy="472" r="4" fill="#1baf7a"/>
+<text x="450.3" y="476" font-size="12.5" fill="#52514e">18× SM103 GPU</text>
+<circle cx="564.3" cy="472" r="4" fill="#eda100"/>
+<text x="575.3" y="476" font-size="12.5" fill="#52514e">18× M5 Pro CPU</text>
+<circle cx="693.6" cy="472" r="4" fill="#9861d6"/>
+<text x="704.6" y="476" font-size="12.5" fill="#52514e">20× M5 Pro GPU</text>
+<circle cx="310.8" cy="494" r="4" fill="#c64f68"/>
+<text x="321.8" y="498" font-size="12.5" fill="#52514e">Pref-Voting, 1× Xeon4 CPU</text>
+<circle cx="503.9" cy="494" r="4" fill="#8c7853"/>
+<text x="514.9" y="498" font-size="12.5" fill="#52514e">Pref-Voting, 1× M5 Pro CPU</text>
 </svg>

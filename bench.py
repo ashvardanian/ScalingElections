@@ -14,12 +14,12 @@ import numpy as np
 import kemeny
 import scalingelections
 import schulze
-from ballots import generate_preferences
+from ballots import generate_preferences, resolve_tally_score_type
 
 
-def benchmark_implementation[Result](
-    callback: Callable[[np.ndarray], Result],
-    inputs: np.ndarray,
+def benchmark_implementation[Input, Result](
+    callback: Callable[[Input], Result],
+    inputs: Input,
     warmup: int,
     repeat: int,
 ) -> tuple[int, Result]:
@@ -34,21 +34,23 @@ def benchmark_implementation[Result](
         start = time.perf_counter_ns()
         result = callback(inputs)
         elapsed = time.perf_counter_ns() - start
-        print("  sample_ns", elapsed)
+        print(f"  sample_ns {elapsed:d}")
         total += elapsed
         remaining -= 1
         if remaining == 0:
             break
     average = total // repeat
-    print("  mean_ns", average, "│", f"{average / 1e6:.3f} ms")
+    print(f"  mean_ns {average:d} │ {average / 1e6:.3f} ms")
     return average, result
 
 
 def selected_by(pattern: str, name: str) -> bool:
+    """Match a backend name against the command-line filter."""
     return pattern == "." or any(part and part in name.lower() for part in pattern.lower().split(","))
 
 
-def main():
+def main() -> None:
+    """Benchmark selected backends and verify that their results agree."""
     parser = argparse.ArgumentParser(description="Benchmark ballots, Schulze, and Kemeny-Young")
     parser.add_argument("--method", choices=("ballots", "schulze", "kemeny"), default="schulze")
     parser.add_argument("--num-candidates", type=int, default=128)
@@ -72,8 +74,6 @@ def main():
     n, voters = args.num_candidates, args.num_voters
     if n < 1 or voters < 0 or args.warmup < 0 or args.repeat < 1:
         parser.error("Candidates and repeat must be positive; voters and warmup cannot be negative")
-    if args.method == "ballots" and args.score_bits is not None:
-        parser.error("--score-bits applies only to Schulze and Kemeny")
     if args.method == "ballots" and voters == 0:
         parser.error("--num-voters must be positive for ballot benchmarks")
     if args.method == "kemeny" and n > 33:
@@ -89,8 +89,8 @@ def main():
     if not targets:
         parser.error("No selected backend is available")
 
-    print("Method:", args.method, "Candidates:", n, "Voters:", voters, "Seed:", args.seed)
-    print("Warmup:", args.warmup, "Repeat:", args.repeat)
+    print(f"Method: {args.method} Candidates: {n:d} Voters: {voters:d} Seed: {args.seed:d}")
+    print(f"Warmup: {args.warmup:d} Repeat: {args.repeat:d}")
     generator = np.random.default_rng(args.seed)
     if args.method == "ballots":
         inputs = np.empty((voters, n), dtype=np.uint32)
@@ -108,30 +108,32 @@ def main():
         "schulze": scalingelections.compute_strongest_paths,
         "kemeny": scalingelections.compute_kemeny_ranking,
     }[args.method]
-    options = {}
-    if args.method in ("schulze", "kemeny"):
-        options["score_type"] = scalingelections.ScoreType(args.score_bits or "auto")
+    score_type = scalingelections.ScoreType(args.score_bits or "auto")
+    if args.method == "ballots":
+        resolved_score_type = resolve_tally_score_type(voters, score_type)
+    else:
         resolve_score_type = {
             "schulze": schulze.resolve_score_type,
             "kemeny": kemeny.resolve_score_type,
         }[args.method]
-        print("Score bits:", resolve_score_type(inputs, options["score_type"]).bits)
+        resolved_score_type = resolve_score_type(inputs, score_type)
+    print(f"Score bits: {resolved_score_type.bits:d}")
 
     baseline = None
     for name, implementation, backend in targets:
-        print("→", name)
-        callback = partial(operation, implementation=implementation, backend=backend, **options)
+        print(f"→ {name}")
+        callback = partial(operation, implementation=implementation, backend=backend, score_type=score_type)
         average, result = benchmark_implementation(callback, inputs, args.warmup, args.repeat)
         if args.method == "ballots":
             if np.any(np.diag(result)) or np.any(
                 (result.astype(np.uint64) + result.T)[np.triu_indices(n, 1)] != voters
             ):
                 raise RuntimeError("Tally did not count every ballot")
-            print("  rate", voters * 1e9 / average, "ballots/s")
+            print(f"  rate {voters * 1e9 / average:.3f} ballots/s")
         elif args.method == "schulze":
-            print("  rate", n**3 * 1e9 / average, "cells/s")
+            print(f"  rate {n**3 * 1e9 / average:.3f} cells/s")
         else:
-            ranking, score, winners, unique = result
+            ranking, score, winners, multiplicity = result
             if sorted(ranking) != list(range(n)) or score != sum(
                 int(inputs[ranking[later], ranking[earlier]]) for earlier in range(n) for later in range(earlier + 1, n)
             ):
@@ -147,10 +149,10 @@ def main():
     assert baseline is not None
     if args.method == "schulze":
         winners, ranking = schulze.compute_election_results(list(range(n)), baseline)
-        print("Winners:", winners, "Top candidates:", ranking[:5])
+        print(f"Winners: {winners} Top candidates: {ranking[:5]}")
     elif args.method == "kemeny":
-        print("Score:", baseline.score, "Ranking:", baseline.ranking)
-        print("Winners:", baseline.winners, "Unique:", baseline.unique)
+        print(f"Score: {baseline.score:d} Ranking: {baseline.ranking}")
+        print(f"Winners: {baseline.winners} Multiplicity: {baseline.multiplicity.value}")
 
 
 if __name__ == "__main__":
