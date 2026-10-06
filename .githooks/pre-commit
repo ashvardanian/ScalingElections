@@ -1,9 +1,28 @@
 #!/usr/bin/env bash
+#
+# ScalingElections pre-commit: formatters and house rules over the staged tree.
+#
+# The index is checked out into a scratch directory and every check reads files there, so unstaged edits
+# can neither pass nor fail a commit. Each check prints `path:line: reason` lines and `report` collects
+# them, so a commit breaking three rules shows all three at once.
+# Install with `pixi run hooks`; bypass knowingly with `git commit --no-verify`.
+
 set -euo pipefail
+shopt -s lastpipe
+
+# Fails the commit when its input holds any `path:line: reason` line, printing them all.
+report() {
+    local hits
+    hits=$(cat)
+    [[ -z $hits ]] && return 0
+    printf '%s\n' "$hits" >&2
+    status=1
+}
+
+# region Source Rules
 
 reject_source() {
-    printf '%s:%s: %s\n' "$source_path" "$source_line" "$1" >&2
-    status=1
+    printf '%s:%s: %s\n' "$source_path" "$source_line" "$1"
 }
 
 check_ceiling_divisions() {
@@ -55,6 +74,7 @@ check_atomic_orders() {
     done
 }
 
+# Joins each statement across lines, blanks strings and comments, then checks ceiling divisions and atomics.
 check_source() {
     local source_path=$1 source_line=0 line text='' declaration name
     local block_comment=0 opens closes atomic_names='__no_atomic_object__'
@@ -96,11 +116,344 @@ check_source() {
     done < "$source_path"
 }
 
+# endregion Source Rules
+
+# region Prose
+
+# Words that legitimately stay in capitals: acronyms and product names, never emphasis.
+allowed_capitals='ABI ASCII AVX BLAS CPU CSR CUDA DPX GPU HIP IEEE JSON MAX NEON NVCC NVIDIA OOB OPENMP PATH PTX README ROCM SASS SIGINT SIMD TBB TMA UTF WGMMA'
+
+# Emits `line<TAB>text` for every comment and docstring line of a C-family or `#`-commented file, with
+# string literals blanked, so prose rules never fire on code and code rules never fire on prose.
+prose_lines() {
+    local language=hash
+    case $1 in *.cu|*.cuh) language=c ;; esac
+    awk -v language="$language" '
+        function unquote(text) {
+            gsub(/"([^"\\]|\\.)*"/, "\"\"", text)
+            gsub(/\047([^\047\\]|\\.)*\047/, "\047\047", text)
+            return text
+        }
+        language == "c" {
+            line = $0
+            if (block) {
+                end = index(line, "*/")
+                if (end) { block = 0; print FNR "\t" substr(line, 1, end - 1) } else print FNR "\t" line
+                next
+            }
+            line = unquote(line)
+            slash = index(line, "//")
+            open = index(line, "/*")
+            if (open && (!slash || open < slash)) {
+                rest = substr(line, open + 2)
+                end = index(rest, "*/")
+                if (end) print FNR "\t" substr(rest, 1, end - 1)
+                else { block = 1; print FNR "\t" rest }
+                next
+            }
+            if (slash) print FNR "\t" substr(line, slash + 2)
+            next
+        }
+        {
+            line = $0
+            if (literal) {
+                if (index(line, "\"\"\"")) literal = 0
+                next
+            }
+            if (docstring) {
+                end = index(line, "\"\"\"")
+                if (!end) { print FNR "\t" line; next }
+                docstring = 0
+                print FNR "\t" substr(line, 1, end - 1)
+                next
+            }
+            start = index(line, "\"\"\"")
+            # A triple-quoted value, like a usage text, is a string rather than a docstring.
+            if (start && substr(line, 1, start - 1) ~ /([=(,][[:space:]]*|(^|[^A-Za-z0-9_])[tfrb])$/) {
+                if (!index(substr(line, start + 3), "\"\"\"")) literal = 1
+                next
+            }
+            if (start) {
+                rest = substr(line, start + 3)
+                end = index(rest, "\"\"\"")
+                if (end) print FNR "\t" substr(rest, 1, end - 1)
+                else { docstring = 1; print FNR "\t" rest }
+                next
+            }
+            line = unquote(line)
+            hash = index(line, "#")
+            if (hash) print FNR "\t" substr(line, hash + 1)
+        }' "$1"
+}
+
+# Prose arrows are →, asides are clauses rather than dashes, emphasis is never capitals, comments
+# describe what the code does now rather than its history or its steps, and no sections are ruled.
+# A backend documents itself and never cites another language's sources, which drift independently.
+check_prose() {
+    prose_lines "$1" | awk -F '\t' -v path="$1" -v allowed="$allowed_capitals" '
+        BEGIN { split(allowed, words, " "); for (i in words) capitals[words[i]] = 1 }
+        {
+            text = $2
+            gsub(/`[^`]*`/, "", text)
+            where = path ":" $1 ": "
+            if (text ~ / -> /) print where "write → for arrows in prose"
+            if (text ~ /[A-Za-z,)] (-|--) [A-Za-z(]/ || text ~ /—/) print where "rewrite the dash aside as a clause or a second sentence"
+            if (text ~ /^[[:space:]]*[-=*#\/][-=*#\/][-=*#\/][-=*#\/]/) print where "name sections with a region, never a ruler"
+            if (text ~ /(^|[^A-Za-z])Step [0-9]+:/) print where "comments say why, they do not number the steps"
+            if (text ~ /[Pp]reviously|[Nn]o longer|used to (be|do|work)|[Tt]he (old|previous|legacy) (implementation|version|code|design)/)
+                print where "describe the current behaviour, history belongs in commit messages"
+            if (path ~ /\.mojo$/ && text ~ /\.cuh?([^A-Za-z]|$)|_cuda_([^A-Za-z]|$)/) print where "a Mojo docstring cites C++ sources"
+            if (path ~ /\.(cu|cuh)$/ && text ~ /\.(mojo|py)([^A-Za-z]|$)/) print where "a C++ comment cites another language"
+            if (path ~ /^(ballots|schulze|kemeny|scalingelections)\.py$/ && text ~ /\.(cuh?|mojo)([^A-Za-z]|$)|_cuda_([^A-Za-z]|$)/)
+                print where "a Python docstring cites another language"
+            rest = text
+            while (match(rest, /[A-Z][A-Z][A-Z][A-Z]+/)) {
+                word = substr(rest, RSTART, RLENGTH)
+                before = RSTART > 1 ? substr(rest, RSTART - 1, 1) : " "
+                after = substr(rest, RSTART + RLENGTH, 1)
+                rest = substr(rest, RSTART + RLENGTH)
+                if (before ~ /[A-Za-z0-9_]/ || after ~ /[a-z0-9_]/) continue
+                if (!(word in capitals)) print where "\"" word "\" is emphasis in capitals; reword or add the acronym to allowed_capitals"
+            }
+        }'
+}
+
+# endregion Prose
+
+# region Symmetry
+
+# Backend dispatch is a `switch` over `backend_t` whose GPU legs exist in every build, with a throwing
+# stub per configuration; a GPU guard inside a function body forks one body into two programs.
+# `WITH_GPU` covers both vendors, while `WITH_CUDA` and `WITH_HIP` each name exactly one.
+# Namespaces stay flat like the directory, so only aliases such as `namespace py = pybind11;` exist.
+# A generic lambda taking `auto` by value is a type tag; dispatch through an explicit template argument.
+# Plain iterator algorithms say the same as `std::ranges` without its template machinery.
+# NumPy's type hierarchy, not a dtype's kind character, decides what counts as an integer.
+# Count types come from one dispatch table per language, so no signature defaults one.
+# Imports and includes form one block at the top of a file, so a declaration never lands between them.
+check_import_block() {
+    awk '
+        FNR == 1 { coded = 0; depth = 0; docstring = 0; native = FILENAME ~ /\.(cu|cuh)$/ }
+        native {
+            if ($0 ~ /^#[[:space:]]*include/ && coded) print FILENAME ":" FNR ": an include follows code; keep includes in one block at the top"
+            else if ($0 !~ /^[[:space:]]*(#|\/\/|\/?\*|$)/) coded = 1
+            next
+        }
+        {
+            quotes = gsub(/"""/, "&")
+            if (docstring) { if (quotes % 2) docstring = 0; next }
+            if (quotes % 2) { docstring = 1; next }
+            if (depth) { depth += gsub(/\(/, "(") - gsub(/\)/, ")"); next }
+            if ($0 ~ /^(import|from)[[:space:]]/) {
+                if (coded) print FILENAME ":" FNR ": an import follows code; keep imports in one block at the top"
+                depth = gsub(/\(/, "(") - gsub(/\)/, ")")
+                next
+            }
+            if ($0 ~ /^[^[:space:]#]/ && quotes == 0) coded = 1
+        }' "$1"
+}
+
+# Limits come from the types or from the device at runtime, never from a hard-coded grid cap or byte budget.
+check_magic_limits() {
+    awk '
+        {
+            line = $0
+            gsub(/"([^"\\]|\\.)*"/, "\"\"", line)
+            sub(/(\/\/|#).*/, "", line)
+            if (line ~ /(^|[^0-9])65535([^0-9]|$)|<<[[:space:]]*(20|30)([^0-9]|$)|1024[[:space:]]*\*[[:space:]]*1024/)
+                print FILENAME ":" FNR ": derive this limit from the types or query it from the device"
+        }' "$1"
+}
+check_cpp_layout() {
+    awk '
+        {
+            line = $0
+            gsub(/"([^"\\]|\\.)*"/, "\"\"", line)
+            sub(/\/\/.*/, "", line)
+            where = FILENAME ":" FNR ": "
+            if (line ~ /^[[:space:]]*#[[:space:]]*(if|elif).*SCALING_ELECTIONS_WITH_GPU/ && depth > 0)
+                print where "a GPU guard inside a body; give the GPU leaf a stub per configuration instead"
+            if (line ~ /!defined\(SCALING_ELECTIONS_WITH_(CUDA|HIP)\)/)
+                print where "name the vendor a block is for, WITH_CUDA or WITH_HIP, instead of negating the other"
+            if (line ~ /(^|[^A-Za-z_])namespace[[:space:]]+[A-Za-z_]+[[:space:]]*(\{|$)/)
+                print where "namespaces stay flat; only namespace aliases are allowed"
+            if (line ~ /=[[:space:]]*\[[^]]*\][[:space:]]*\(auto[[:space:]]+[a-z_]+\)/)
+                print where "a lambda taking a type tag; dispatch with an explicit template argument"
+            if (line ~ /(typename|tally_arithmetic)[[:space:]]+[a-z_]*(count|arithmetic)[a-z_]*_type_[[:space:]]*=/)
+                print where "a count type is chosen by the dispatcher, never defaulted in a template"
+            if (line ~ /dtype\(\)\.kind\(\)/)
+                print where "classify dtypes with numpy.issubdtype, never by their kind character"
+            if (line ~ /std::to_string\(/)
+                print where "build messages with std::format interpolation, not concatenation"
+            if (line ~ /std::(ranges|views)::/)
+                print where "call the plain STL algorithm on iterators rather than std::ranges or std::views"
+            if (line ~ /__global__[[:space:]]+void[[:space:]]+[a-z0-9_]+[[:space:]]*\(/ && line !~ /_cuda_[[:space:]]*\(/)
+                print where "a kernel name ends with _cuda_"
+            if (line ~ /[(,][[:space:]]*bool([[:space:]]+const)?[[:space:]]+[a-z_]+[[:space:]]*[,)=]/)
+                print where "a bool parameter steers control flow; take an enum and switch on it"
+            if (line ~ /^[[:space:]]*#/) next
+            opens = gsub(/\{/, "{", line)
+            closes = gsub(/\}/, "}", line)
+            depth += opens - closes
+        }' "$1"
+}
+
+# Mojo kernels share their base names with the C++ ones and end with `_kernel`; flags are enums.
+check_mojo_layout() {
+    awk '
+        {
+            line = $0
+            sub(/#.*/, "", line)
+            where = FILENAME ":" FNR ": "
+            if (match(line, /enqueue_function\[[a-z0-9_]+/)) {
+                name = substr(line, RSTART + 17, RLENGTH - 17)
+                if (name !~ /_kernel$/) print where "the launched kernel " name " ends with _kernel"
+            }
+            if (line ~ /dtype\.kind/)
+                print where "classify dtypes with np.issubdtype, never by their kind character"
+            if (line ~ /\+[[:space:]]*String\(|String\([^)]*\)[[:space:]]*\+[[:space:]]*"|\.format\(/)
+                print where "build messages with t-string interpolation, not concatenation or format"
+            if (line ~ /String\(error\)[[:space:]]*[!=]=/)
+                print where "an error is classified by its type or its condition, never by its text"
+            if (line ~ /[A-Za-z]*(Count|Arithmetic)[A-Za-z]*(DataType|Mode):[[:space:]]*[A-Za-z]+[[:space:]]*=/)
+                print where "a count type is chosen by the dispatcher, never defaulted in a signature"
+            if (line ~ /[(,][[:space:]]*[a-z_]+:[[:space:]]*Bool[[:space:]]*[,)=]/)
+                print where "a Bool parameter steers control flow; take an enum-like struct instead"
+        }' "$1"
+}
+
+# The method modules sit below the dispatcher, so they never import it; flags are enums outside tests.
+check_python_layout() {
+    awk '
+        {
+            where = FILENAME ":" FNR ": "
+            if (FILENAME ~ /^(ballots|schulze|kemeny)\.py$/ && $0 ~ /^[[:space:]]*(from|import)[[:space:]]+scalingelections([^_A-Za-z]|$)/)
+                print where "a method module imports the dispatcher above it"
+            if ($0 ~ /dtype\.kind/)
+                print where "classify dtypes with np.issubdtype, never by their kind character"
+            if (FILENAME !~ /^(test|conftest)\.py$/ && $0 ~ /[(,][[:space:]]*[a-z_]+:[[:space:]]*bool[[:space:]]*[,)=]/)
+                print where "a bool parameter steers control flow; take an enum instead"
+        }' "$1"
+}
+
+# Score types are listed from the widest range down, in enums, dispatch ladders and messages alike:
+# saturated64, uint64, uint32, uint16. A conditional expression picking the smallest fitting type is
+# exempt, since it reads naturally from narrow to wide.
+check_score_type_order() {
+    awk '
+        function rank(name) {
+            return name == "saturated64" ? 4 : name == "uint64" ? 3 : name == "uint32" ? 2 : 1
+        }
+        {
+            where = FILENAME ":" FNR ": "
+            line = $0
+            if (line ~ /[Ss]core[_ -]?[Tt]ype/ && line !~ /\?/ && line !~ / if .* else /) {
+                rest = line
+                previous = 9
+                while (match(rest, /(saturated64|uint64|uint32|uint16)/)) {
+                    current = rank(substr(rest, RSTART, RLENGTH))
+                    prefix = RSTART > 6 ? substr(rest, RSTART - 6, 6) : substr(rest, 1, RSTART - 1)
+                    suffix = substr(rest, RSTART + RLENGTH, 2)
+                    rest = substr(rest, RSTART + RLENGTH)
+                    if (suffix == "_t" || prefix ~ /(np|DType)\.$/) continue
+                    if (current > previous) { print where "list score types from the widest range down"; break }
+                    previous = current
+                }
+            }
+            name = ""
+            if (match(line, /case score_type_t::[a-z0-9]+_k/)) name = substr(line, RSTART + 19, RLENGTH - 21)
+            else if (match(line, /(==|is) ScoreType\.[a-z0-9]+:[[:space:]]*$/)) {
+                name = substr(line, RSTART, RLENGTH)
+                sub(/.*ScoreType\./, "", name)
+                sub(/:.*/, "", name)
+            }
+            else if (match(line, /^[[:space:]]*(comptime[[:space:]]+)?(saturated64|uint64|uint32|uint16)[[:space:]]*=/)) {
+                name = line
+                sub(/^[[:space:]]*(comptime[[:space:]]+)?/, "", name)
+                sub(/[[:space:]]*=.*/, "", name)
+            }
+            if (name == "" || name == "auto") next
+            if (FNR - last_line <= 10 && rank(name) > last_rank) print where "dispatch score types from the widest range down"
+            last_line = FNR
+            last_rank = rank(name)
+        }' "$1"
+}
+
+# A C++ file opens with a Doxygen header naming itself and its author; Python and Mojo modules open
+# with a docstring, like the sibling Mojo projects.
+check_file_header() {
+    awk -v name="${1##*/}" '
+        FNR == 1 { native = FILENAME ~ /\.(cu|cuh)$/ }
+        native && FNR <= 8 && index($0, "@file " name) && $0 ~ (name "[[:space:]]*$") { named = 1 }
+        native && FNR <= 8 && /@author/ { authored = 1 }
+        !native && !opened && !/^(#!|[[:space:]]*$)/ {
+            opened = 1
+            if ($0 !~ /^"""/) print FILENAME ":" FNR ": a module opens with its docstring"
+        }
+        END { if (native && !(named && authored)) print FILENAME ":1: the header names its @file and @author" }
+    ' "$1"
+}
+
+# Both native modules export the same functions, so the Python dispatcher can route to either.
+check_native_exports() {
+    awk '
+        function collect(text, pattern, names,    found) {
+            while (match(text, pattern)) {
+                found = substr(text, RSTART, RLENGTH)
+                text = substr(text, RSTART + RLENGTH)
+                sub(/^[^"]*"/, "", found)
+                sub(/".*/, "", found)
+                names[found] = 1
+            }
+        }
+        { text[FILENAME] = text[FILENAME] " " $0 }
+        END {
+            collect(text["scalingelections.cu"], "m\\.def\\([[:space:]]*\"[A-Za-z_]+\"", cpp)
+            collect(text["scalingelections.mojo"], "def_function\\[[A-Za-z_]+\\]\\([[:space:]]*\"[A-Za-z_]+\"", mojo)
+            for (name in cpp) if (!(name in mojo)) print "scalingelections.mojo:1: does not export " name
+            for (name in mojo) if (!(name in cpp)) print "scalingelections.cu:1: does not export " name
+        }' scalingelections.cu scalingelections.mojo
+}
+
+# endregion Symmetry
+
+# region Driver
+
+check_file() {
+    case $1 in
+        *.cu|*.cuh)
+            check_source "$1"
+            check_prose "$1"
+            check_cpp_layout "$1"
+            check_magic_limits "$1"
+            check_import_block "$1"
+            check_score_type_order "$1"
+            check_file_header "$1" ;;
+        *.mojo)
+            check_source "$1"
+            check_prose "$1"
+            check_mojo_layout "$1"
+            check_magic_limits "$1"
+            check_import_block "$1"
+            check_score_type_order "$1"
+            check_file_header "$1" ;;
+        *.py)
+            check_prose "$1"
+            check_python_layout "$1"
+            check_magic_limits "$1"
+            check_import_block "$1"
+            check_score_type_order "$1"
+            check_file_header "$1" ;;
+    esac
+}
+
+# endregion Driver
+
 root=$(git rev-parse --show-toplevel)
 snapshot=$(mktemp -d)
 trap 'rm -rf "$snapshot"' EXIT
-git checkout-index --all --prefix="$snapshot/"
-cd "$root"
+git -C "$root" checkout-index --all --prefix="$snapshot/"
+cd "$snapshot"
 status=0
 
 python_files=()
@@ -108,33 +461,32 @@ cpp_files=()
 mojo_files=()
 toml_files=()
 while IFS= read -r -d '' path; do
-    case "$path" in
-        *.py) python_files+=("$snapshot/$path") ;;
-        *.cu|*.cuh|*.cpp|*.hpp|*.h) cpp_files+=("$snapshot/$path") ;;
+    case $path in
+        *.py) python_files+=("$path") ;;
+        *.cu|*.cuh) cpp_files+=("$path") ;;
         *.mojo) mojo_files+=("$path") ;;
-        *.toml) toml_files+=("$snapshot/$path") ;;
+        *.toml) toml_files+=("$path") ;;
     esac
-done < <(git ls-files -z)
+done < <(git -C "$root" ls-files -z)
 
 if ((${#python_files[@]})); then
-    uv run --no-sync ruff format --check --config "$snapshot/pyproject.toml" "${python_files[@]}" || status=1
+    uv run --project "$root" --no-sync ruff format --check "${python_files[@]}" || status=1
 fi
 if ((${#cpp_files[@]})); then
     clang-format --dry-run --Werror "${cpp_files[@]}" || status=1
 fi
-if ((${#mojo_files[@]})); then
-    for path in "${mojo_files[@]}"; do
-        pixi run mojo format -l 120 "$snapshot/$path" || status=1
-        if ! git show ":$path" | cmp -s - "$snapshot/$path"; then
-            echo "Unformatted Mojo file: $path (run pixi run format)" >&2
-            status=1
-        fi
-    done
-fi
+# `mojo format` has no check mode, so it rewrites the snapshot copy and the result is compared to the index.
+for path in "${mojo_files[@]}"; do
+    pixi run --manifest-path "$root/pixi.toml" mojo format -q -l 120 "$path" || status=1
+    git -C "$root" show ":$path" | cmp -s - "$path" || { echo "$path: run pixi run format" >&2; status=1; }
+done
 if ((${#toml_files[@]})); then
-    (cd "$snapshot" && taplo format --check) || status=1
+    taplo format --check "${toml_files[@]}" || status=1
 fi
-for path in "${cpp_files[@]}"; do check_source "$path"; done
-for path in "${mojo_files[@]}"; do check_source "$snapshot/$path"; done
-git diff --cached --check || status=1
+
+for path in "${cpp_files[@]}" "${mojo_files[@]}" "${python_files[@]}"; do
+    check_file "$path" | report
+done
+check_native_exports | report
+git -C "$root" diff --cached --check || status=1
 exit "$status"

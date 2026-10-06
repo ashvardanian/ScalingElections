@@ -16,6 +16,9 @@ import scalingelections
 import schulze
 from ballots import generate_preferences, resolve_tally_score_type
 
+NATIONAL_ELECTORATE = 350_000_000
+"""Voters in a national election, the largest count a random benchmark matrix cell is drawn up to."""
+
 
 def benchmark_implementation[Input, Result](
     callback: Callable[[Input], Result],
@@ -58,7 +61,7 @@ def main() -> None:
         "--num-voters",
         type=int,
         default=2000,
-        help="0 draws matrix counts in [0, 350M]",
+        help=f"0 draws matrix counts in [0, {NATIONAL_ELECTORATE:,}]",
     )
     parser.add_argument(
         "-k",
@@ -69,15 +72,15 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--score-bits", choices=tuple(scalingelections.ScoreType))
+    parser.add_argument("--score-type", choices=tuple(scalingelections.ScoreType), default="auto")
     args = parser.parse_args()
     n, voters = args.num_candidates, args.num_voters
     if n < 1 or voters < 0 or args.warmup < 0 or args.repeat < 1:
         parser.error("Candidates and repeat must be positive; voters and warmup cannot be negative")
     if args.method == "ballots" and voters == 0:
         parser.error("--num-voters must be positive for ballot benchmarks")
-    if args.method == "kemeny" and n > 33:
-        parser.error("Kemeny supports at most 33 candidates")
+    if args.method == "kemeny" and n > kemeny.KEMENY_MAX_CANDIDATES:
+        parser.error(f"Kemeny is exact from 1 to {kemeny.KEMENY_MAX_CANDIDATES} candidates")
 
     targets = []
     for implementation in scalingelections.available_implementations():
@@ -100,7 +103,7 @@ def main() -> None:
         inputs = (
             generate_preferences(n, voters, generator)
             if voters
-            else generator.integers(0, 350_000_001, (n, n), dtype=np.uint32)
+            else generator.integers(0, NATIONAL_ELECTORATE + 1, (n, n), dtype=np.uint32)
         )
         np.fill_diagonal(inputs, 0)
     operation = {
@@ -108,7 +111,7 @@ def main() -> None:
         "schulze": scalingelections.compute_strongest_paths,
         "kemeny": scalingelections.compute_kemeny_ranking,
     }[args.method]
-    score_type = scalingelections.ScoreType(args.score_bits or "auto")
+    score_type = scalingelections.ScoreType(args.score_type)
     if args.method == "ballots":
         resolved_score_type = resolve_tally_score_type(voters, score_type)
     else:
@@ -125,9 +128,7 @@ def main() -> None:
         callback = partial(operation, implementation=implementation, backend=backend, score_type=score_type)
         average, result = benchmark_implementation(callback, inputs, args.warmup, args.repeat)
         if args.method == "ballots":
-            if np.any(np.diag(result)) or np.any(
-                (result.astype(np.uint64) + result.T)[np.triu_indices(n, 1)] != voters
-            ):
+            if np.any(np.diag(result)) or np.any((result + result.T)[np.triu_indices(n, 1)] != voters):
                 raise RuntimeError("Tally did not count every ballot")
             print(f"  rate {voters * 1e9 / average:.3f} ballots/s")
         elif args.method == "schulze":

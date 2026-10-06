@@ -3,24 +3,24 @@
 This module holds nothing but argument marshalling and the module table. `main` lives in
 `cli.mojo`, because Mojo refuses to emit a shared library from a module that defines one.
 
-Contiguous integer arrays cross the boundary through typed NumPy views and bulk copies.
-Python sequences retain checked integer conversion before entering the solvers.
+Contiguous integer arrays cross the boundary through typed NumPy views, and every result is
+allocated as a NumPy array first so the solvers write into it directly. Python sequences retain
+checked integer conversion before entering the solvers.
 """
 
 from std.collections import Span, StringDict
 from std.os import abort
 from std.python import Python, PythonObject
 from std.python.bindings import ExceptionType, PythonModuleBuilder, raise_python_exception
-from std.python.numpy import copy_to_numpy_tensor, from_numpy_tensor
+from std.python.numpy import from_numpy_tensor
 from std.sys import has_accelerator
-from std.utils.coord import Coord
 
 from max.gpu.host import DeviceContext
 
 import ballots
 import kemeny
 import schulze
-from ballots import Backend, PairwiseRelation, ScoreType, Unranked, VoteMatrix, VoteMatrixView
+from ballots import Arithmetic, Backend, PairwiseRelation, ScoreType, Unranked, VoteMatrixView, with_score_type
 
 # region Python Bindings
 
@@ -44,6 +44,54 @@ def integer_from(value: PythonObject) raises -> Int:
     return Int(py=value.__index__())
 
 
+def python_error(message: String, exception: ExceptionType) -> PythonObject:
+    return PythonObject(from_owned=raise_python_exception(Error(message), exception))
+
+
+def numpy_array[DataType: DType](shape: PythonObject) raises -> PythonObject:
+    """A fresh NumPy array a solver fills in place."""
+    return Python.import_module("numpy").empty(shape, dtype=String(DataType))
+
+
+def numpy_data[DataType: DType](array: PythonObject) raises -> Pointer[Scalar[DataType], MutUntrackedOrigin]:
+    """The first element of an array `numpy_array` allocated, so contiguous and writable."""
+    return Pointer[Scalar[DataType], MutUntrackedOrigin](unsafe_from_address=Int(py=array.ctypes.data))
+
+
+def unsigned_integers(mut array: PythonObject) raises -> PythonObject:
+    """
+    Checks `array` holds nonnegative integers below 2^64, converting object entries once through
+    `__index__` into a `uint64` array.
+
+    Returns None on success, otherwise the raised Python exception for the caller to return.
+    """
+    var np = Python.import_module("numpy")
+    if Bool(np.issubdtype(array.dtype, np.object_)):
+        var builtins = Python.import_module("builtins")
+        var index = Python.import_module("operator").index
+        var boolean_types = Python().tuple(builtins.bool, np.bool_)
+        var converted = np.empty(array.shape, dtype="uint64")
+        for cell in range(integer_from(array.size)):
+            var value = array.flat[cell]
+            if Bool(builtins.isinstance(value, boolean_types)) or not Bool(
+                builtins.hasattr(builtins.type(value), "__index__")
+            ):
+                return python_error("Entries must be integers", ExceptionType("PyExc_TypeError"))
+            var integer = index(value)
+            if Bool(integer < 0) or Bool(integer > PythonObject(UInt64.MAX)):
+                return python_error("Entries must fit UInt64", ExceptionType("PyExc_OverflowError"))
+            converted.flat[cell] = integer
+        array = converted
+        return PythonObject(None)
+    if not Bool(np.issubdtype(array.dtype, np.integer)):
+        if integer_from(array.size) == 0:
+            return PythonObject(None)
+        return python_error("Entries must be integers", ExceptionType("PyExc_TypeError"))
+    if Bool(np.issubdtype(array.dtype, np.signedinteger)) and integer_from(array.size) and Bool(array.min() < 0):
+        return python_error("Entries must be nonnegative", ExceptionType("PyExc_OverflowError"))
+    return PythonObject(None)
+
+
 @fieldwise_init
 struct SolverOperation(Copyable, Equatable, ImplicitlyCopyable, Movable, TrivialRegisterPassable):
     """The solver result selected when specializing the shared Python input boundary."""
@@ -58,12 +106,6 @@ struct SolverOperation(Copyable, Equatable, ImplicitlyCopyable, Movable, Trivial
         return self.value == other.value
 
 
-def matrix_to_python[StoredCountDataType: DType](matrix: VoteMatrix[StoredCountDataType]) raises -> PythonObject:
-    var n = matrix.num_candidates
-    var values = Span(unsafe_ptr=matrix.data, length=n * n)
-    return copy_to_numpy_tensor(values, Coord(n, n))
-
-
 def solve[
     Operation: SolverOperation
 ](preferences: PythonObject, var kwargs: StringDict[PythonObject]) raises -> PythonObject:
@@ -71,10 +113,10 @@ def solve[
     try:
         score_type = score_type_from(kwargs)
     except error:
-        return PythonObject(from_owned=raise_python_exception(error, ExceptionType("PyExc_ValueError")))
+        return python_error(String(error), ExceptionType("PyExc_ValueError"))
     for key in kwargs:
         if String(key) != "backend":
-            return python_error("Unknown keyword: " + String(key), ExceptionType("PyExc_TypeError"))
+            return python_error(String(t"Unknown keyword: {key}"), ExceptionType("PyExc_TypeError"))
     var backend_name = String(kwargs["backend"]) if "backend" in kwargs else String("cpu")
     if backend_name != "cpu" and backend_name != "gpu":
         return python_error("backend must be cpu or gpu", ExceptionType("PyExc_ValueError"))
@@ -91,39 +133,19 @@ def solve[
     var n = integer_from(array.shape[0])
     if n < 1 or integer_from(array.shape[1]) != n:
         return python_error("Preferences must be a nonempty square matrix", ExceptionType("PyExc_ValueError"))
-    if UInt64(n) > UInt64(UInt32.MAX) - UInt64(schulze.TILE_SIZE) or n > Int.MAX // n // 8:
+    if UInt64(n) > UInt64(ballots.CandidateIndex.MAX) - UInt64(schulze.TILE_SIZE) or n > Int.MAX // n // 8:
         return python_error("Matrix size exceeds the addressable range", ExceptionType("PyExc_OverflowError"))
     comptime if Operation == SolverOperation.kemeny_ranking or Operation == SolverOperation.kemeny_costs:
-        if n > kemeny.KEMENY_MAX_CANDIDATES:
-            return python_error(
-                "Kemeny supports at most " + String(kemeny.KEMENY_MAX_CANDIDATES) + " candidates",
-                ExceptionType("PyExc_ValueError"),
-            )
-    var kind = String(array.dtype.kind)
-    if kind == "O":
-        var index = Python.import_module("operator").index
-        var boolean_types = Python().tuple(builtins.bool, np.bool_)
-        var converted = np.empty(array.shape, dtype="uint64")
-        for cell in range(n * n):
-            var value = array.flat[cell]
-            if Bool(builtins.isinstance(value, boolean_types)) or not Bool(
-                builtins.hasattr(builtins.type(value), "__index__")
-            ):
-                return python_error(
-                    "Entries must be integers representable by UInt64", ExceptionType("PyExc_TypeError")
-                )
-            var integer = index(value)
-            if Bool(integer < 0) or Bool(integer > PythonObject(UInt64.MAX)):
-                return python_error("Entries must fit UInt64", ExceptionType("PyExc_OverflowError"))
-            converted.flat[cell] = integer
-        return solve_matrix[Operation, DType.uint64](converted, backend, score_type)
-    if (kind != "u" and kind != "i") or integer_from(array.itemsize) > 8:
-        return python_error("Entries must be integers representable by UInt64", ExceptionType("PyExc_TypeError"))
-    if kind == "i" and Bool(array.min() < 0):
-        return python_error("Entries must be nonnegative", ExceptionType("PyExc_OverflowError"))
-    if kind == "u" and integer_from(array.itemsize) == 8:
+        try:
+            kemeny.require_kemeny_width(n)
+        except error:
+            return python_error(String(error), ExceptionType("PyExc_ValueError"))
+    var failure = unsigned_integers(array)
+    if failure is not PythonObject(None):
+        return failure
+    if Bool(array.dtype == np.uint64):
         return solve_matrix[Operation, DType.uint64](np.ascontiguousarray(array, dtype="uint64"), backend, score_type)
-    if integer_from(array.itemsize) <= 4 or Bool(array.max() <= PythonObject(UInt32.MAX)):
+    if Bool(array.max() <= PythonObject(UInt32.MAX)):
         return solve_matrix[Operation, DType.uint32](np.ascontiguousarray(array, dtype="uint32"), backend, score_type)
     return solve_matrix[Operation, DType.uint64](np.ascontiguousarray(array, dtype="uint64"), backend, score_type)
 
@@ -140,90 +162,89 @@ def solve_matrix[
     )
     try:
         comptime if Operation == SolverOperation.strongest_paths:
-            score_type = schulze.resolve_score_type(matrix, score_type)
+            score_type = schulze.resolve_score_type[schulze.SeedGraph.winning_votes](matrix, score_type)
         elif Operation == SolverOperation.split_cycle_winners:
             score_type = schulze.resolve_score_type[schulze.SeedGraph.positive_margins](matrix, score_type)
         else:
             score_type = kemeny.resolve_score_type(matrix, score_type)
     except error:
-        return PythonObject(from_owned=raise_python_exception(error, ExceptionType("PyExc_OverflowError")))
-    var result: PythonObject
-    if score_type == ScoreType.uint16:
-        result = solve_typed[Operation, DType.uint16](matrix, backend)
-    elif score_type == ScoreType.uint32:
-        result = solve_typed[Operation, DType.uint32](matrix, backend)
-    elif score_type == ScoreType.uint64:
-        result = solve_typed[Operation, DType.uint64](matrix, backend)
-    else:
-        result = solve_typed[Operation, DType.uint64, ballots.Arithmetic.saturated](matrix, backend)
-    return result^
+        return python_error(String(error), ExceptionType("PyExc_OverflowError"))
+
+    def solve_with[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> PythonObject:
+        return solve_typed[Operation, ArithmeticDataType, ArithmeticMode](matrix, backend)
+
+    return with_score_type(score_type, solve_with)
 
 
 def solve_typed[
+    StoredCountDataType: DType,
+    //,
     Operation: SolverOperation,
     ArithmeticDataType: DType,
-    ArithmeticMode: ballots.Arithmetic = ballots.Arithmetic.exact,
-    StoredCountDataType: DType = DType.uint32,
+    ArithmeticMode: Arithmetic,
 ](matrix: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> PythonObject:
     comptime if Operation == SolverOperation.strongest_paths:
-        var paths = schulze.strongest_paths_typed[ArithmeticDataType, schulze.SeedGraph.winning_votes](matrix, backend)
-        return matrix_to_python(paths)
+        var paths = numpy_array[ArithmeticDataType](Python().tuple(matrix.num_candidates, matrix.num_candidates))
+        schulze.strongest_paths_typed[ArithmeticDataType, schulze.SeedGraph.winning_votes](
+            matrix, backend, numpy_data[ArithmeticDataType](paths)
+        )
+        return paths
     elif Operation == SolverOperation.split_cycle_winners:
         var undefeated = schulze.split_cycle_winners_typed[ArithmeticDataType](matrix, backend)
         var winners = Python().list()
         for candidate in undefeated:
             winners.append(PythonObject(candidate))
         return winners
+    elif Operation == SolverOperation.kemeny_costs:
+        return kemeny_costs_to_python[ArithmeticDataType, ArithmeticMode](matrix, backend)
     else:
+        var trace: List[kemeny.KemenyTraceWord]
         try:
-            kemeny.require_kemeny_score_range[ArithmeticDataType, ArithmeticMode](matrix)
+            trace = kemeny.compute_kemeny_trace_gpu[ArithmeticDataType, ArithmeticMode](
+                matrix
+            ) if backend == Backend.gpu else kemeny.compute_kemeny_trace_cpu[ArithmeticDataType, ArithmeticMode](matrix)
         except error:
-            return PythonObject(from_owned=raise_python_exception(error, ExceptionType("PyExc_OverflowError")))
-        comptime if Operation == SolverOperation.kemeny_costs:
-            return kemeny_costs_to_python[ArithmeticDataType, ArithmeticMode](matrix, backend)
-        else:
-            var solution = kemeny.compute_kemeny_ranking_gpu[ArithmeticDataType, ArithmeticMode](
-                matrix
-            ) if backend == Backend.gpu else kemeny.compute_kemeny_ranking_cpu[ArithmeticDataType, ArithmeticMode](
-                matrix
-            )
-            if solution.score == UInt64.MAX:
-                return python_error(
-                    "Kemeny optimum reached the saturation sentinel", ExceptionType("PyExc_OverflowError")
-                )
-            var ranking = Python().list()
-            for candidate in solution.ranking:
-                ranking.append(PythonObject(candidate))
-            var winners = Python().list()
-            for candidate in solution.winners:
-                winners.append(PythonObject(candidate))
-            return Python().tuple(
-                ranking, PythonObject(solution.score), winners, PythonObject(solution.multiplicity.name())
-            )
+            return python_error(String(error), ExceptionType("PyExc_RuntimeError"))
+        var solution: kemeny.KemenySolution
+        try:
+            solution = kemeny.kemeny_solution_from_trace[ArithmeticDataType](trace)
+        except failure:
+            if failure == kemeny.KemenyTraceError.overflow:
+                return python_error(String(failure), ExceptionType("PyExc_OverflowError"))
+            return python_error(String(failure), ExceptionType("PyExc_RuntimeError"))
+        var ranking = Python().list()
+        for candidate in solution.ranking:
+            ranking.append(PythonObject(candidate))
+        var winners = Python().list()
+        for candidate in solution.winners:
+            winners.append(PythonObject(candidate))
+        return Python().tuple(
+            ranking, PythonObject(solution.score), winners, PythonObject(solution.multiplicity.name())
+        )
+
+
+def kemeny_costs_to_python[
+    StoredCountDataType: DType, //, ArithmeticDataType: DType, ArithmeticMode: Arithmetic
+](matrix: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> PythonObject:
+    var states = 1 << matrix.num_candidates
+    var sums = kemeny.KemenySums[ArithmeticDataType, ArithmeticMode](matrix)
+    var costs = numpy_array[ArithmeticDataType](PythonObject(states))
+    var costs_ptr = numpy_data[ArithmeticDataType](costs)
+    if backend == Backend.gpu:
+        var ctx = DeviceContext()
+        var (device_costs, _) = kemeny.compute_kemeny_costs_gpu(ctx, sums)
+        ctx.enqueue_copy(dst_ptr=costs_ptr, src_buf=device_costs)
+        ctx.synchronize()
+    else:
+        kemeny.compute_kemeny_costs_cpu(sums, costs_ptr)
+    if costs_ptr[unsafe_offset=states - 1] == SIMD[ArithmeticDataType, 1].MAX:
+        return python_error(String(kemeny.KemenyTraceError.overflow), ExceptionType("PyExc_OverflowError"))
+    return costs
 
 
 def compute_strongest_paths(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
     """Compute widest paths with selected-width storage and arithmetic."""
     return solve[SolverOperation.strongest_paths](preferences, kwargs^)
-
-
-def kemeny_costs_to_python[
-    ArithmeticDataType: DType,
-    ArithmeticMode: ballots.Arithmetic = ballots.Arithmetic.exact,
-    StoredCountDataType: DType = DType.uint64,
-](matrix: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> PythonObject:
-    var n = matrix.num_candidates
-    var sums = kemeny.KemenySums[ArithmeticDataType, ArithmeticMode](matrix)
-    if backend == Backend.cpu:
-        var costs = kemeny.compute_kemeny_costs_cpu(matrix, sums)
-        var values = Span(unsafe_ptr=costs.unsafe_ptr(), length=len(costs))
-        return copy_to_numpy_tensor(values, Coord(len(costs)))
-    var ctx = DeviceContext()
-    var (costs, _) = kemeny.compute_kemeny_costs_gpu(ctx, matrix, sums)
-    var host_costs = ctx.enqueue_create_host_buffer[ArithmeticDataType](1 << n)
-    costs.enqueue_copy_to(host_costs)
-    ctx.synchronize()
-    return copy_to_numpy_tensor(host_costs.as_span(), Coord(1 << n))
 
 
 def _compute_kemeny_costs(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
@@ -236,8 +257,9 @@ def compute_kemeny_ranking(preferences: PythonObject, var **kwargs: PythonObject
     return solve[SolverOperation.kemeny_ranking](preferences, kwargs^)
 
 
-def python_error(message: String, exception: ExceptionType) -> PythonObject:
-    return PythonObject(from_owned=raise_python_exception(Error(message), exception))
+def compute_split_cycle_winners(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
+    """Return every candidate undefeated under Split Cycle."""
+    return solve[SolverOperation.split_cycle_winners](preferences, kwargs^)
 
 
 def ballot_values[
@@ -249,51 +271,24 @@ def ballot_values[
     return Span(unsafe_ptr=view.data.unsafe_ptr().unsafe_origin_cast[ImmUntrackedOrigin](), length=len(view.data))
 
 
-def tally_to_python[
-    ArithmeticDataType: DType, ArithmeticMode: ballots.Arithmetic, RelationCount: Int
-](prepared: ballots.RaggedBallots, relation: PairwiseRelation, backend: Backend) raises -> PythonObject:
-    var counted = ballots.tally_ragged_typed[ArithmeticDataType, ArithmeticMode, RelationCount](
-        prepared, relation, backend
-    )
-    var outputs = Python().list()
-    for output in range(RelationCount):
-        comptime if ArithmeticMode == ballots.Arithmetic.saturated:
-            for cell in range(prepared.num_candidates * prepared.num_candidates):
-                if counted[output].data[unsafe_offset=cell] == SIMD[ArithmeticDataType, 1].MAX:
-                    return python_error("Tally reached the saturation sentinel", ExceptionType("PyExc_OverflowError"))
-        var values = Span(unsafe_ptr=counted[output].data, length=prepared.num_candidates * prepared.num_candidates)
-        outputs.append(copy_to_numpy_tensor(values, Coord(prepared.num_candidates, prepared.num_candidates)))
-    comptime if RelationCount == 1:
-        return outputs[0]
-    else:
-        return Python.import_module("builtins").tuple(outputs)
-
-
 def tally_prepared[
-    RelationCount: Int
+    Relation: PairwiseRelation
 ](candidates: PythonObject, var kwargs: StringDict[PythonObject]) raises -> PythonObject:
     """Counts dense or CSR integer-weighted candidates with explicit ties and omission semantics."""
+    comptime planes = Relation.planes()
     var offsets_arg = kwargs.pop("offsets") if "offsets" in kwargs else PythonObject(None)
     var count_arg = kwargs.pop("num_candidates") if "num_candidates" in kwargs else PythonObject(None)
     var ranks_arg = kwargs.pop("ranks") if "ranks" in kwargs else PythonObject(None)
     var weights_arg = kwargs.pop("weights") if "weights" in kwargs else PythonObject(None)
     var unranked_arg = kwargs.pop("unranked") if "unranked" in kwargs else PythonObject("unknown")
-    var relation_name = String(kwargs.pop("relation")) if "relation" in kwargs else String("preference")
-    var relation = PairwiseRelation.preference
-    if relation_name == "indifference":
-        relation = PairwiseRelation.indifference
-    elif relation_name == "unknown":
-        relation = PairwiseRelation.unknown
-    elif relation_name != "preference":
-        return python_error("Unknown pairwise relation", ExceptionType("PyExc_ValueError"))
     var score_type: ScoreType
     try:
         score_type = score_type_from(kwargs)
     except error:
-        return PythonObject(from_owned=raise_python_exception(error, ExceptionType("PyExc_ValueError")))
+        return python_error(String(error), ExceptionType("PyExc_ValueError"))
     for key in kwargs:
         if String(key) != "backend":
-            return python_error("Unknown keyword: " + String(key), ExceptionType("PyExc_TypeError"))
+            return python_error(String(t"Unknown keyword: {key}"), ExceptionType("PyExc_TypeError"))
     var backend_name = String(kwargs["backend"]) if "backend" in kwargs else String("cpu")
     if backend_name != "cpu" and backend_name != "gpu":
         return python_error("backend must be cpu or gpu", ExceptionType("PyExc_ValueError"))
@@ -311,9 +306,13 @@ def tally_prepared[
             return python_error("num_candidates must be an integer", ExceptionType("PyExc_TypeError"))
         if Bool(count_arg < 0) or Bool(count_arg > PythonObject(UInt32.MAX)):
             return python_error("num_candidates must fit UInt32", ExceptionType("PyExc_OverflowError"))
-        if Bool(count_arg == 0):
-            return python_error("num_candidates must be positive", ExceptionType("PyExc_ValueError"))
     var inputs = Python().tuple(candidates, offsets_arg, ranks_arg, weights_arg)
+    var storage_types = Python().tuple(
+        String(ballots.CandidateIndex.dtype),
+        String(ballots.BallotOffset.dtype),
+        String(ballots.RankLabel.dtype),
+        String(ballots.VoterWeight.dtype),
+    )
     var arrays = Python().list()
     for input_index in range(4):
         var values = inputs[input_index]
@@ -323,44 +322,32 @@ def tally_prepared[
         var array = np.asarray(values) if Bool(builtins.isinstance(values, np.ndarray)) else np.asarray(
             values, dtype="object"
         )
-        var kind = String(array.dtype.kind)
         var dimensions = 2 if offsets_arg is PythonObject(None) and (input_index == 0 or input_index == 2) else 1
         if integer_from(array.ndim) != dimensions:
             return python_error("Ballot arrays have incompatible dimensions", ExceptionType("PyExc_ValueError"))
-        if kind == "O":
-            for entry in range(integer_from(array.size)):
-                var value = array.flat[entry]
-                if not Bool(builtins.isinstance(value, integer_types)) or Bool(
-                    builtins.isinstance(value, boolean_types)
-                ):
-                    return python_error("Ballot entries must be integers", ExceptionType("PyExc_TypeError"))
-        elif kind != "u" and kind != "i" and integer_from(array.size) != 0:
-            return python_error("Ballot entries must be integers", ExceptionType("PyExc_TypeError"))
-        var maximum = PythonObject(UInt32.MAX) if input_index == 0 or input_index == 2 else PythonObject(UInt64.MAX)
-        if integer_from(array.size) and ((kind != "u" and Bool(array.min() < 0)) or Bool(array.max() > maximum)):
+        var failure = unsigned_integers(array)
+        if failure is not PythonObject(None):
+            return failure
+        var storage = storage_types[input_index]
+        if integer_from(array.size) and Bool(array.max() > np.iinfo(storage).max):
             return python_error(
                 "Ballot entries exceed their unsigned storage range", ExceptionType("PyExc_OverflowError")
             )
-        var dtype = "uint32" if input_index == 0 or input_index == 2 else "uint64"
-        arrays.append(np.ascontiguousarray(array, dtype=dtype))
+        arrays.append(np.ascontiguousarray(array, dtype=storage))
     var candidate_array = arrays[0]
     offsets_arg = arrays[1]
     ranks_arg = arrays[2]
     weights_arg = arrays[3]
-    var flat = ballot_values[DType.uint32](candidate_array.reshape(-1))
+    var flat = ballot_values[ballots.CandidateIndex.dtype](candidate_array.reshape(-1))
     var offset_values = List[ballots.BallotOffset]()
-    var offsets = ballot_values[DType.uint64](offsets_arg)
-    var ranks = ballot_values[DType.uint32](ranks_arg)
-    var weights = ballot_values[DType.uint64](weights_arg)
+    var offsets = ballot_values[ballots.BallotOffset.dtype](offsets_arg)
     var num_candidates: Int
-    var num_ballots: Int
     var dense_width = 0
     if offsets_arg is PythonObject(None):
-        num_ballots = integer_from(candidate_array.shape[0])
         dense_width = integer_from(candidate_array.shape[1])
         num_candidates = dense_width if count_arg is PythonObject(None) else integer_from(count_arg)
-        for ballot in range(num_ballots + 1):
-            offset_values.append(UInt64(ballot) * UInt64(dense_width))
+        for ballot in range(integer_from(candidate_array.shape[0]) + 1):
+            offset_values.append(ballots.BallotOffset(ballot) * ballots.BallotOffset(dense_width))
         offsets = ballots.ballot_span(offset_values)
         if ranks_arg is not PythonObject(None) and not Bool(ranks_arg.shape == candidate_array.shape):
             return python_error("Ranks must match the candidates shape", ExceptionType("PyExc_ValueError"))
@@ -368,98 +355,74 @@ def tally_prepared[
         if count_arg is PythonObject(None):
             return python_error("CSR ballots require num_candidates", ExceptionType("PyExc_ValueError"))
         num_candidates = integer_from(count_arg)
-        num_ballots = len(offsets) - 1
-        if num_ballots < 0:
-            return python_error("Offsets must include their initial zero", ExceptionType("PyExc_ValueError"))
-    if ranks_arg is not PythonObject(None):
-        if len(ranks) != len(flat):
-            return python_error("Ranks must match the entries length", ExceptionType("PyExc_ValueError"))
     var policy_values = List[ballots.PolicyCode]()
     var unranked = Unranked.unknown
     try:
         if Bool(builtins.isinstance(unranked_arg, builtins.str)):
             unranked = Unranked.parse(String(unranked_arg))
         else:
-            if len(unranked_arg) != num_ballots:
-                return python_error("Unranked policies must match the ballot count", ExceptionType("PyExc_ValueError"))
-            for ballot in range(num_ballots):
+            if len(unranked_arg) != len(offsets) - 1:
+                raise Error("Unranked policies must match the ballot count")
+            for ballot in range(len(unranked_arg)):
                 policy_values.append(Unranked.parse(String(unranked_arg[ballot])).value)
     except error:
-        return PythonObject(from_owned=raise_python_exception(error, ExceptionType("PyExc_ValueError")))
-    if num_candidates < 1 or UInt64(num_candidates) > UInt64(UInt32.MAX):
-        return python_error("num_candidates must be a positive UInt32 integer", ExceptionType("PyExc_ValueError"))
-    if num_candidates > Int.MAX // num_candidates // (8 * RelationCount):
-        return python_error("Matrix size exceeds the addressable range", ExceptionType("PyExc_OverflowError"))
-    if offsets[0] != 0 or offsets[num_ballots] != UInt64(len(flat)):
-        return python_error(
-            "Offsets must start at zero and end at the entries length", ExceptionType("PyExc_ValueError")
-        )
-    for ballot in range(num_ballots):
-        if offsets[ballot] > offsets[ballot + 1] or offsets[ballot + 1] > UInt64(len(flat)):
-            return python_error(
-                "Offsets must be monotone and within the entries length", ExceptionType("PyExc_ValueError")
-            )
-    var seen = List[Int]()
-    seen.resize(num_candidates, -1)
-    for ballot in range(num_ballots):
-        var start = Int(offsets[ballot])
-        var end = Int(offsets[ballot + 1])
-        for entry in range(start, end):
-            var candidate = Int(flat[entry])
-            if candidate >= num_candidates or seen[candidate] == ballot:
-                return PythonObject(
-                    from_owned=raise_python_exception(
-                        Error("Every ballot must list distinct candidates within the candidate range"),
-                        ExceptionType("PyExc_ValueError"),
-                    )
-                )
-            seen[candidate] = ballot
-    if (
-        RelationCount == 1
-        and offsets_arg is PythonObject(None)
-        and ranks_arg is PythonObject(None)
-        and weights_arg is PythonObject(None)
-        and dense_width == num_candidates
-        and relation == PairwiseRelation.preference
-    ):
-        try:
-            score_type = ballots.resolve_tally_score_type(UInt64(num_ballots), score_type)
-        except error:
-            return PythonObject(from_owned=raise_python_exception(error, ExceptionType("PyExc_OverflowError")))
-        if score_type == ScoreType.uint32 and (backend == Backend.cpu or num_candidates <= 64):
-            var counted = ballots.tally_ballots(flat, num_ballots, num_candidates, backend=backend)
-            var result = matrix_to_python(counted)
-            _ = arrays^
-            return result^
-    if weights_arg is not PythonObject(None) and len(weights) != num_ballots:
-        return python_error("Weights must match the ballot count", ExceptionType("PyExc_ValueError"))
+        return python_error(String(error), ExceptionType("PyExc_ValueError"))
     var prepared = ballots.RaggedBallots(
         flat,
         offsets,
-        ranks,
-        weights,
+        ballot_values[ballots.RankLabel.dtype](ranks_arg),
+        ballot_values[ballots.VoterWeight.dtype](weights_arg),
         ballots.ballot_span(policy_values),
         num_candidates,
         unranked,
     )
-    var bound = UInt64(num_ballots)
-    if len(weights):
-        bound = 0
-        for ballot in range(num_ballots):
-            bound = ballots.add_counts[ballots.Arithmetic.saturated](bound, weights[ballot])
+    var bound: ballots.VoterWeight
+    try:
+        bound = ballots.validate_ragged_ballots(prepared)
+    except error:
+        return python_error(String(error), ExceptionType("PyExc_ValueError"))
+    if num_candidates > Int.MAX // num_candidates // (8 * planes):
+        return python_error("Matrix size exceeds the addressable range", ExceptionType("PyExc_OverflowError"))
     try:
         score_type = ballots.resolve_tally_score_type(bound, score_type)
     except error:
-        return PythonObject(from_owned=raise_python_exception(error, ExceptionType("PyExc_OverflowError")))
-    var result: PythonObject
-    if score_type == ScoreType.uint16:
-        result = tally_to_python[DType.uint16, ballots.Arithmetic.exact, RelationCount](prepared, relation, backend)
-    elif score_type == ScoreType.uint32:
-        result = tally_to_python[DType.uint32, ballots.Arithmetic.exact, RelationCount](prepared, relation, backend)
-    elif score_type == ScoreType.saturated64:
-        result = tally_to_python[DType.uint64, ballots.Arithmetic.saturated, RelationCount](prepared, relation, backend)
-    else:
-        result = tally_to_python[DType.uint64, ballots.Arithmetic.exact, RelationCount](prepared, relation, backend)
+        return python_error(String(error), ExceptionType("PyExc_OverflowError"))
+
+    def tally_shape() raises {imm} -> PythonObject:
+        comptime if Relation == PairwiseRelation.all:
+            return Python().tuple(planes, num_candidates, num_candidates)
+        else:
+            return Python().tuple(num_candidates, num_candidates)
+
+    def tally[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> PythonObject:
+        var counts = numpy_array[ArithmeticDataType](tally_shape())
+        var counts_ptr = numpy_data[ArithmeticDataType](counts)
+        # Complete rankings take the dense kernel wherever it can count them in this arithmetic.
+        if (
+            Relation == PairwiseRelation.preference
+            and dense_width == num_candidates
+            and len(prepared.ranks) == 0
+            and len(prepared.weights) == 0
+            and (
+                backend == Backend.cpu
+                or ballots.tally_dense_serves_gpu[ArithmeticDataType, ArithmeticMode](DeviceContext(), num_candidates)
+            )
+        ):
+            ballots.tally_ballots[ArithmeticDataType, ArithmeticMode](
+                flat, len(offsets) - 1, num_candidates, counts_ptr, backend=backend
+            )
+        else:
+            ballots.tally_ragged_typed[ArithmeticDataType, ArithmeticMode, Relation](prepared, backend, counts_ptr)
+        comptime if ArithmeticMode == Arithmetic.saturated:
+            for cell in range(num_candidates * num_candidates * planes):
+                if counts_ptr[unsafe_offset=cell] == SIMD[ArithmeticDataType, 1].MAX:
+                    return python_error("Tally reaches the overflow sentinel", ExceptionType("PyExc_OverflowError"))
+        comptime if Relation == PairwiseRelation.all:
+            return Python.import_module("builtins").tuple(counts)
+        else:
+            return counts
+
+    var result = with_score_type(score_type, tally)
     _ = arrays^
     _ = offset_values^
     _ = policy_values^
@@ -468,7 +431,14 @@ def tally_prepared[
 
 def tally_ballots(candidates: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
     """Counts one dense or CSR ballot relation with integer weights and explicit ties."""
-    return tally_prepared[1](candidates, kwargs^)
+    var relation = String(kwargs.pop("relation")) if "relation" in kwargs else String("preference")
+    if relation == "preference":
+        return tally_prepared[PairwiseRelation.preference](candidates, kwargs^)
+    if relation == "indifference":
+        return tally_prepared[PairwiseRelation.indifference](candidates, kwargs^)
+    if relation == "unknown":
+        return tally_prepared[PairwiseRelation.unknown](candidates, kwargs^)
+    return python_error("relation must be preference, indifference, or unknown", ExceptionType("PyExc_ValueError"))
 
 
 def tally_pairwise_relations(candidates: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
@@ -477,12 +447,7 @@ def tally_pairwise_relations(candidates: PythonObject, var **kwargs: PythonObjec
         return python_error(
             "tally_pairwise_relations always returns all three relations", ExceptionType("PyExc_TypeError")
         )
-    return tally_prepared[3](candidates, kwargs^)
-
-
-def compute_split_cycle_winners(preferences: PythonObject, var **kwargs: PythonObject) raises -> PythonObject:
-    """Return every candidate undefeated under Split Cycle."""
-    return solve[SolverOperation.split_cycle_winners](preferences, kwargs^)
+    return tally_prepared[PairwiseRelation.all](candidates, kwargs^)
 
 
 @export
@@ -498,7 +463,7 @@ def PyInit_scalingelections_mojo() abi("C") -> PythonObject:
         builder.def_function[compute_split_cycle_winners]("compute_split_cycle_winners")
         return builder.finalize()
     except error:
-        abort(String("Failed to initialize scalingelections_mojo: ", error))
+        abort(String(t"Failed to initialize scalingelections_mojo: {error}"))
 
 
 # endregion Python Bindings

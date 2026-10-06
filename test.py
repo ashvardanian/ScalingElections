@@ -12,19 +12,19 @@ from __future__ import annotations
 
 import enum
 import itertools
-from unittest.mock import patch
 from collections.abc import Sequence
 from types import ModuleType
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import numpy as np
-from numpy.typing import NDArray
 import pytest
+from numpy.typing import NDArray
 
 import ballots
 import kemeny
-import schulze
 import scalingelections
+import schulze
 from conftest import Implementation, derived_seed, exhaustive_scale, randomized_repetitions_count
 from scalingelections import Backend, ScoreType, Unranked
 
@@ -42,8 +42,8 @@ JAVA_FIRST_BALLOT = [3, 0, 2, 1]
 
 
 def oracle_pairwise_preferences(
-    rankings: Sequence[Sequence[int]] | NDArray[np.uint32 | np.uint64],
-) -> NDArray[np.uint32 | np.uint64]:
+    rankings: Sequence[Sequence[int]] | NDArray[np.uint64 | np.uint32],
+) -> NDArray[np.uint64 | np.uint32]:
     """Counts the ballots placing each candidate ahead of each other one, by definition."""
     num_candidates = max(max(ranking) for ranking in rankings) + 1
     preferences = np.zeros((num_candidates, num_candidates), dtype=np.uint32)
@@ -54,7 +54,7 @@ def oracle_pairwise_preferences(
     return preferences
 
 
-def oracle_strongest_paths(preferences: NDArray[np.uint32 | np.uint64]) -> NDArray[np.uint32 | np.uint64]:
+def oracle_strongest_paths(preferences: NDArray[np.uint64 | np.uint32]) -> NDArray[np.uint64 | np.uint32]:
     """Widest paths over winning votes, by the textbook triple loop."""
     num_candidates = len(preferences)
     strengths = [[0] * num_candidates for _ in range(num_candidates)]
@@ -72,7 +72,7 @@ def oracle_strongest_paths(preferences: NDArray[np.uint32 | np.uint64]) -> NDArr
     return np.array(strengths, dtype=preferences.dtype).reshape(num_candidates, num_candidates)
 
 
-def oracle_schulze_wins(preferences: NDArray[np.uint32 | np.uint64]) -> list[int]:
+def oracle_schulze_wins(preferences: NDArray[np.uint64 | np.uint32]) -> list[int]:
     """How many rivals each candidate beats on strongest paths, which is what Schulze ranks by."""
     strengths = oracle_strongest_paths(preferences)
     num_candidates = len(preferences)
@@ -82,7 +82,7 @@ def oracle_schulze_wins(preferences: NDArray[np.uint32 | np.uint64]) -> list[int
     ]
 
 
-def kendall_score(preferences: NDArray[np.uint32 | np.uint64], ranking: Sequence[int]) -> int:
+def kendall_score(preferences: NDArray[np.uint64 | np.uint32], ranking: Sequence[int]) -> int:
     """Votes contradicting the ranking, summed over every pair it orders."""
     return sum(
         int(preferences[ranking[later]][ranking[earlier]])
@@ -91,7 +91,7 @@ def kendall_score(preferences: NDArray[np.uint32 | np.uint64], ranking: Sequence
     )
 
 
-def oracle_kemeny(preferences: NDArray[np.uint32 | np.uint64]) -> tuple[tuple[int, ...], int]:
+def oracle_kemeny(preferences: NDArray[np.uint64 | np.uint32]) -> tuple[tuple[int, ...], int]:
     """The exact consensus ranking, by scoring every ordering there is."""
     orderings = itertools.permutations(range(len(preferences)))
     return min(
@@ -100,7 +100,7 @@ def oracle_kemeny(preferences: NDArray[np.uint32 | np.uint64]) -> tuple[tuple[in
     )
 
 
-def oracle_split_cycle_winners(preferences: NDArray[np.uint32 | np.uint64]) -> list[int]:
+def oracle_split_cycle_winners(preferences: NDArray[np.uint64 | np.uint32]) -> list[int]:
     """
     The undefeated candidates under Holliday and Pacuit's Definition 3.3.
 
@@ -136,14 +136,14 @@ def oracle_split_cycle_winners(preferences: NDArray[np.uint32 | np.uint64]) -> l
     return [candidate for candidate in range(num_candidates) if candidate not in defeated]
 
 
-def tied_preferences(num_candidates: int, votes: int = 4) -> NDArray[np.uint32 | np.uint64]:
+def tied_preferences(num_candidates: int, votes: int = 4) -> NDArray[np.uint64 | np.uint32]:
     """A profile where every pair is an exact tie, so no edge survives the winning-votes filter."""
     preferences = np.full((num_candidates, num_candidates), votes, dtype=np.uint32)
     np.fill_diagonal(preferences, 0)
     return preferences
 
 
-def random_preferences(num_candidates: int, num_voters: int, seed: int) -> NDArray[np.uint16 | np.uint32 | np.uint64]:
+def random_preferences(num_candidates: int, num_voters: int, seed: int) -> NDArray[np.uint64 | np.uint32 | np.uint16]:
     """A reproducible profile drawn from random ballots."""
     return ballots.generate_preferences(num_candidates, num_voters, np.random.default_rng(seed))
 
@@ -173,12 +173,12 @@ PROFILE_CASES = [pytest.param(matrix, id=name) for name, matrix in PROFILES.item
 @pytest.mark.parametrize("rankings", BALLOT_CASES)
 def test_pairwise_preferences_match_oracle(rankings: Sequence[Sequence[int]]) -> None:
     """Complete ballot counts agree with direct pairwise comparisons."""
-    built = ballots.build_pairwise_preferences([np.asarray(ranking, dtype=np.int64) for ranking in rankings])
+    built = scalingelections.build_pairwise_preferences([np.asarray(ranking, dtype=np.int64) for ranking in rankings])
     assert np.array_equal(built, oracle_pairwise_preferences(rankings))
 
 
 @pytest.mark.parametrize("preferences", PROFILE_CASES)
-def test_kemeny_matches_oracle(preferences: NDArray[np.uint32 | np.uint64]) -> None:
+def test_kemeny_matches_oracle(preferences: NDArray[np.uint64 | np.uint32]) -> None:
     """The returned ordering achieves the exhaustive optimum."""
     ranking, score, _, _ = kemeny.compute_kemeny_ranking(preferences)
     assert sorted(ranking) == list(range(len(preferences))), "The ranking must seat every candidate once"
@@ -188,10 +188,11 @@ def test_kemeny_matches_oracle(preferences: NDArray[np.uint32 | np.uint64]) -> N
 
 def test_kemeny_refuses_a_field_wider_than_the_table(implementation: Implementation) -> None:
     """The cost table is exponential, so the width is refused before anything is allocated for it."""
-    with pytest.raises(ValueError, match="33 candidates"):
-        kemeny.compute_kemeny_ranking(np.zeros((36, 36), dtype=np.uint32))
-    with pytest.raises(ValueError, match="33 candidates"):
-        implementation.compute_kemeny_ranking(np.zeros((36, 36), dtype=np.uint32))
+    ceiling = kemeny.KEMENY_MAX_CANDIDATES
+    with pytest.raises(ValueError, match=f"{ceiling} candidates"):
+        kemeny.compute_kemeny_ranking(np.zeros((ceiling + 1, ceiling + 1), dtype=np.uint32))
+    with pytest.raises(ValueError, match=f"{ceiling} candidates"):
+        implementation.compute_kemeny_ranking(np.zeros((ceiling + 1, ceiling + 1), dtype=np.uint32))
 
 
 # endregion Oracles
@@ -202,7 +203,7 @@ def test_kemeny_refuses_a_field_wider_than_the_table(implementation: Implementat
 
 @pytest.mark.parametrize("preferences", PROFILE_CASES)
 def test_strongest_paths_agree_across_languages(
-    preferences: NDArray[np.uint32 | np.uint64], implementation: Implementation
+    preferences: NDArray[np.uint64 | np.uint32], implementation: Implementation
 ) -> None:
     """Every implementation matches the textbook widest-path recurrence."""
     actual = np.asarray(implementation.compute_strongest_paths(preferences), dtype=np.uint32)
@@ -211,7 +212,7 @@ def test_strongest_paths_agree_across_languages(
 
 @pytest.mark.parametrize("preferences", PROFILE_CASES)
 def test_kemeny_agrees_across_languages(
-    preferences: NDArray[np.uint32 | np.uint64], implementation: Implementation
+    preferences: NDArray[np.uint64 | np.uint32], implementation: Implementation
 ) -> None:
     """Implementations agree on the optimum and its deterministic representative."""
     expected = kemeny.compute_kemeny_ranking(preferences)
@@ -222,10 +223,10 @@ def test_kemeny_agrees_across_languages(
 
 @pytest.mark.parametrize("preferences", PROFILE_CASES)
 def test_margin_paths_feed_split_cycle_across_languages(
-    preferences: NDArray[np.uint32 | np.uint64], implementation: Implementation
+    preferences: NDArray[np.uint64 | np.uint32], implementation: Implementation
 ) -> None:
     """The shared max-min kernel over margins must serve Split Cycle in every language."""
-    margins = ballots.positive_margins(preferences)
+    margins = schulze.positive_margins(preferences)
     expected = oracle_split_cycle_winners(preferences)
     actual = np.asarray(implementation.compute_strongest_paths(margins), dtype=np.uint32)
     assert schulze.select_split_cycle_winners(preferences, actual) == expected
@@ -233,7 +234,7 @@ def test_margin_paths_feed_split_cycle_across_languages(
 
 @pytest.mark.parametrize("preferences", PROFILE_CASES)
 def test_split_cycle_agrees_across_languages(
-    preferences: NDArray[np.uint32 | np.uint64], implementation: Implementation
+    preferences: NDArray[np.uint64 | np.uint32], implementation: Implementation
 ) -> None:
     """All three ports must name the same undefeated set, and it must match the definition."""
     expected = oracle_split_cycle_winners(preferences)
@@ -242,7 +243,7 @@ def test_split_cycle_agrees_across_languages(
 
 @pytest.mark.parametrize("preferences", PROFILE_CASES)
 def test_split_cycle_contains_the_schulze_winners(
-    preferences: NDArray[np.uint32 | np.uint64], implementation: Implementation
+    preferences: NDArray[np.uint64 | np.uint32], implementation: Implementation
 ) -> None:
     """The direct edge is itself a path, so every Schulze winner belongs to Split Cycle."""
     strengths = np.asarray(implementation.compute_strongest_paths(preferences), dtype=np.uint32)
@@ -284,7 +285,7 @@ def test_tie_heavy_profiles_leave_no_edges(num_candidates: int, implementation: 
 def test_tie_heavy_profiles_keep_every_candidate() -> None:
     """Split Cycle retains all candidates when every margin is tied."""
     preferences = PROFILES["mirrored_four"]
-    margin_paths = schulze.compute_strongest_paths_serial(ballots.positive_margins(preferences))
+    margin_paths = schulze.compute_strongest_paths_serial(schulze.positive_margins(preferences))
     assert schulze.select_split_cycle_winners(preferences, margin_paths) == list(range(len(preferences)))
 
 
@@ -361,7 +362,7 @@ def test_split_cycle_keeps_the_supported_candidate_among_tied_winners() -> None:
     before, after = PROFILES["involvement_10"], PROFILES["involvement_11"]
     winners = []
     for preferences in (before, after):
-        margin_paths = schulze.compute_strongest_paths_serial(ballots.positive_margins(preferences))
+        margin_paths = schulze.compute_strongest_paths_serial(schulze.positive_margins(preferences))
         computed = schulze.select_split_cycle_winners(preferences, margin_paths)
         assert computed == oracle_split_cycle_winners(preferences)
         winners.append(computed)
@@ -431,7 +432,7 @@ def random_profile(
     num_candidates: int,
     num_voters: int,
     spread: BallotSpread = BallotSpread.distinct,
-) -> NDArray[np.uint32 | np.uint64]:
+) -> NDArray[np.uint64 | np.uint32]:
     """Tallies random ballots, so the matrix is always realizable rather than an arbitrary grid."""
     generator = np.random.default_rng(seed)
     preferences = np.zeros((num_candidates, num_candidates), dtype=np.uint32)
@@ -496,7 +497,7 @@ def test_schulze_winners_always_inside_split_cycle(step: int, seed: int) -> None
     preferences = random_profile(seed=seed + step, num_candidates=num_candidates, num_voters=2 + step * 2)
     strongest = schulze.compute_strongest_paths_serial(preferences)
     winners, _ = schulze.compute_election_results(list(range(num_candidates)), strongest)
-    margin_paths = schulze.compute_strongest_paths_serial(ballots.positive_margins(preferences))
+    margin_paths = schulze.compute_strongest_paths_serial(schulze.positive_margins(preferences))
     assert set(winners) <= set(schulze.select_split_cycle_winners(preferences, margin_paths))
 
 
@@ -535,10 +536,10 @@ def test_kemeny_backends_agree_on_larger_fields(
 
 
 # The packed sweep holds two candidates per word, so it is only reachable below this ceiling.
-SIXTEEN_BIT_CEILING = 65535
+SIXTEEN_BIT_CEILING = int(np.iinfo(np.uint16).max)
 
 
-def scaled_profile(num_candidates: int, peak: int, seed: int) -> NDArray[np.uint32 | np.uint64]:
+def scaled_profile(num_candidates: int, peak: int, seed: int) -> NDArray[np.uint64 | np.uint32]:
     """Tallies real ballots, then scales them so the largest count lands exactly on `peak`."""
     preferences = random_profile(seed=seed, num_candidates=num_candidates, num_voters=40)
     largest = int(preferences.max())
@@ -577,8 +578,8 @@ def test_tally_in_chunks_equals_tally_in_one(seed: int) -> None:
     num_candidates = 40
     generator = np.random.default_rng(seed)
     rankings = np.array([generator.permutation(num_candidates) for _ in range(900)], dtype=np.uint32)
-    whole = ballots.tally_chunks([rankings], num_candidates)
-    chunked = ballots.tally_chunks(
+    whole = scalingelections.tally_chunks([rankings], num_candidates)
+    chunked = scalingelections.tally_chunks(
         (rankings[start : start + 128] for start in range(0, len(rankings), 128)),
         num_candidates,
     )
@@ -587,27 +588,17 @@ def test_tally_in_chunks_equals_tally_in_one(seed: int) -> None:
 
 def test_tally_omitted_candidates_are_not_ordered_by_index() -> None:
     """Omission policies never invent preferences among omitted candidates."""
-    counted = ballots.build_pairwise_preferences([[2, 0]], num_candidates=4, unranked=Unranked.worse)
+    counted = scalingelections.build_pairwise_preferences([[2, 0]], num_candidates=4, unranked=Unranked.worse)
     assert counted[2, 0] == 1 and counted[0, 1] == 1 and counted[0, 3] == 1
     assert counted[1, 3] == counted[3, 1] == 0
-    unknown = ballots.build_pairwise_preferences([[2, 0]], num_candidates=4)
+    unknown = scalingelections.build_pairwise_preferences([[2, 0]], num_candidates=4)
     assert unknown.sum() == unknown[2, 0] == 1
 
 
-@pytest.mark.parametrize("implementation", ["cpp-gpu"], indirect=True)
-def test_cpp_gpu_tally_capacity(implementation: Implementation) -> None:
-    """The dense device tally accepts its capacity and rejects wider inputs."""
-    limit = 106
-    rankings = np.arange(limit, dtype=np.uint32).reshape(1, limit)
-    assert np.array_equal(implementation.tally_ballots(rankings), oracle_pairwise_preferences(rankings))
-    with pytest.raises(ValueError):
-        implementation.tally_ballots(np.arange(limit + 1, dtype=np.uint32).reshape(1, limit + 1))
-
-
-@pytest.mark.parametrize("implementation", ["mojo-cpu", "mojo-gpu"], indirect=True)
-def test_mojo_tally_exceeds_dense_kernel_capacity(implementation: Implementation) -> None:
-    """Wide ballots use a tally path beyond the dense kernel limit."""
-    rankings = np.arange(65, dtype=np.uint32).reshape(1, 65)
+@pytest.mark.parametrize("num_candidates", (64, 65, 106, 107, 300))
+def test_tally_exceeds_dense_kernel_capacity(num_candidates: int, implementation: Implementation) -> None:
+    """Ballots wider than a dense device kernel holds fall back to the ragged tally, never to an error."""
+    rankings = np.stack([np.arange(num_candidates), np.arange(num_candidates)[::-1]]).astype(np.uint32)
     assert np.array_equal(implementation.tally_ballots(rankings), oracle_pairwise_preferences(rankings))
 
 
@@ -624,7 +615,7 @@ def as_profile(rankings: Sequence[Sequence[int]]) -> Profile:
     return Profile([[int(candidate) for candidate in ranking] for ranking in rankings])
 
 
-def oracle_kemeny_score_by_arc_set(preferences: NDArray[np.uint32 | np.uint64]) -> int:
+def oracle_kemeny_score_by_arc_set(preferences: NDArray[np.uint64 | np.uint32]) -> int:
     """
     The exact Kemeny score as a minimum-weight feedback arc set, solved by integer program.
 
@@ -650,7 +641,7 @@ KEMENY_ORACLE_SIZES = tuple(21 + 3 * rung for rung in range(exhaustive_scale))
 
 
 @pytest.mark.parametrize("preferences", PROFILE_CASES)
-def test_the_two_kemeny_oracles_agree(preferences: NDArray[np.uint32 | np.uint64], igraph: ModuleType) -> None:
+def test_the_two_kemeny_oracles_agree(preferences: NDArray[np.uint64 | np.uint32], igraph: ModuleType) -> None:
     """The integer program has to reproduce what enumerating every ordering already proves."""
     assert oracle_kemeny_score_by_arc_set(preferences) == oracle_kemeny(preferences)[1]
 
@@ -845,8 +836,9 @@ def test_native_solver_exception_contract(module_name: str) -> None:
         with pytest.raises(OverflowError):
             operation([[0, 131072], [65536, 0]], score_type="uint16")
     for operation in (module.compute_kemeny_ranking, module._compute_kemeny_costs):
-        with pytest.raises(ValueError, match="33"):
-            operation(np.zeros((34, 34), dtype=np.uint32))
+        ceiling = kemeny.KEMENY_MAX_CANDIDATES
+        with pytest.raises(ValueError, match=f"{ceiling} candidates"):
+            operation(np.zeros((ceiling + 1, ceiling + 1), dtype=np.uint32))
 
 
 @pytest.mark.parametrize("module_name", ["scalingelections_cuda", "scalingelections_mojo"])
@@ -910,19 +902,20 @@ def test_kemeny_auto_width_reserves_the_unreachable_sentinel() -> None:
 def test_explicit_gpu_request_does_not_fall_back_to_python() -> None:
     """An unavailable device request never silently executes on the host."""
     with pytest.raises(RuntimeError, match="gpu"):
-        ballots.tally_chunks([], 3, backend=Backend.gpu, implementation="python")
+        scalingelections.tally_chunks([], 3, backend=Backend.gpu, implementation="python")
 
 
 def test_schulze_score_types_preserve_paths(implementation: Implementation) -> None:
     """Arithmetic selection preserves paths and rejects unrepresentable strengths."""
-    preferences = np.array([[0, 65535, 0], [0, 0, 65534], [65533, 0, 0]], dtype=np.uint32)
+    ceiling = SIXTEEN_BIT_CEILING
+    preferences = np.array([[0, ceiling, 0], [0, 0, ceiling - 1], [ceiling - 2, 0, 0]], dtype=np.uint32)
     expected = oracle_strongest_paths(preferences)
     for score_type in ScoreType:
         paths = implementation.compute_strongest_paths(preferences, score_type=score_type)
         assert np.array_equal(paths, expected)
         assert paths.dtype == np.dtype(f"uint{32 if score_type is ScoreType.auto else score_type.bits}")
         assert list(implementation.compute_split_cycle_winners(preferences, score_type=score_type)) == [0]
-    shifted = preferences + np.uint32(65536)
+    shifted = preferences + np.uint32(ceiling + 1)
     np.fill_diagonal(shifted, 0)
     assert list(implementation.compute_split_cycle_winners(shifted, score_type=ScoreType.uint16)) == [0]
     preferences[0, 1] += 1
@@ -1024,7 +1017,7 @@ def test_pairwise_dense_and_csr_views_are_equivalent(implementation: Implementat
         weights=weights,
         unranked=[Unranked.worse, Unranked.worse],
     )
-    for left, right in zip(dense, csr):
+    for left, right in zip(dense, csr, strict=True):
         assert np.array_equal(left, right)
     assert int(dense.indifference[0, 2]) == int(dense.indifference[1, 3]) == 3
     assert int(dense.preferences[0, 1]) == 3
@@ -1123,12 +1116,28 @@ def test_cpp_integer_input_is_converted_once() -> None:
 
 
 def test_tally_output_uses_selected_width(implementation: Implementation) -> None:
-    """Explicit arithmetic selection determines the returned matrix storage width."""
-    for score_type in (ScoreType.uint16, ScoreType.uint32, ScoreType.uint64, ScoreType.saturated64):
-        for weights in (None, [1]):
-            result = implementation.tally_ballots([[0, 1]], weights=weights, score_type=score_type)
-            assert result.dtype == np.dtype(f"uint{score_type.bits}")
-            assert int(result[0, 1]) == 1
+    """Every explicit score type fixes the width of dense and CSR tallies, Schulze paths, and Kemeny costs."""
+    keywords = implementation.enumerate_kemeny_rankings.keywords
+    module = scalingelections._resolve(**keywords)
+    rankings = np.array([[0, 1, 2], [2, 0, 1]], dtype=np.uint32)
+    offsets = np.array([0, 3, 6], dtype=np.uint64)
+    preferences = oracle_pairwise_preferences(rankings)
+    for score_type in (ScoreType.saturated64, ScoreType.uint64, ScoreType.uint32, ScoreType.uint16):
+        dense = implementation.tally_ballots(rankings, score_type=score_type)
+        csr = implementation.tally_ballots(
+            rankings.reshape(-1), offsets=offsets, num_candidates=3, weights=[1, 1], score_type=score_type
+        )
+        assert dense.dtype == csr.dtype == score_type.dtype
+        assert np.array_equal(dense, preferences) and np.array_equal(csr, preferences)
+        assert implementation.compute_strongest_paths(preferences, score_type=score_type).dtype == score_type.dtype
+        costs = (
+            kemeny.compute_kemeny_costs(preferences, score_type=score_type)
+            if module is None
+            else module._compute_kemeny_costs(
+                preferences, backend=keywords["backend"].value, score_type=score_type.value
+            )
+        )
+        assert costs.dtype == score_type.dtype
 
 
 def test_mixed_omission_policies_preserve_pairwise_relations(implementation: Implementation) -> None:
@@ -1191,7 +1200,7 @@ def test_kemeny_enumeration_matches_optimal_permutations(implementation: Impleme
         list(order) for order in itertools.permutations(range(5)) if kendall_score(preferences, order) == optimum
     ]
     assert list(implementation.enumerate_kemeny_rankings(preferences)) == expected
-    module = scalingelections._resolve(**getattr(implementation.enumerate_kemeny_rankings, "keywords"))
+    module = scalingelections._resolve(**implementation.enumerate_kemeny_rankings.keywords)
     owner, name = (kemeny, "compute_kemeny_costs") if module is None else (module, "_compute_kemeny_costs")
     with patch.object(owner, name, wraps=getattr(owner, name)) as solve:
         preferences = np.zeros((8, 8), dtype=np.uint32)

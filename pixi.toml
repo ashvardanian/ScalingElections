@@ -15,7 +15,7 @@ readme = "README.md"
 repository = "https://github.com/ashvardanian/ScalingElections"
 version = "0.2.0"
 
-# `mojo` ships separately from `max` now, so pinning `max` alone no longer pins the compiler.
+# `mojo` ships separately from `max`, so pinning `max` alone does not pin the compiler.
 [dependencies]
 max = ">=26.6,<27"
 mojo = ">=1.1.0,<2"

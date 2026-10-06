@@ -4,6 +4,8 @@ authors = [
 ]
 dependencies = ["numba>=0.67", "numpy>=2.0"]
 description = "ScalingElections: Condorcet Voting at GPU Speed — Schulze as semiring matrix multiplication, Kemeny-Young as exact NP-hard search"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 name = "ScalingElections"
 readme = "README.md"
 requires-python = ">=3.12"

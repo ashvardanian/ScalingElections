@@ -10,29 +10,53 @@ import numpy as np
 from numba import njit, prange
 from numpy.typing import NDArray
 
-from ballots import ScoreType, positive_margins
+from ballots import ScoreType
 
-# Suppress Numba TBB threading layer warnings
 warnings.filterwarnings("ignore", message=".*TBB threading layer.*")
 
 
 TILE_SIZE = 32
-"""The tile edge every backend is compiled for, matching `tile_size_k` in `types.cuh`."""
+"""The tile edge every backend shares, derived from the 1024-thread GPU block limit: one thread per cell of a 32 by 32 tile."""
+
+
+def positive_margins(preferences: NDArray[np.integer]) -> NDArray[np.integer]:
+    """
+    Rewrites pairwise counts so the strongest-paths kernel closes over margins.
+
+    The kernel keeps `preferences[i, j]` when it exceeds `preferences[j, i]` and zeroes it
+    otherwise, so feeding it the clipped margin makes it compute the widest paths of the
+    positive-margin graph without any change to the kernel itself.
+    """
+    return preferences - np.minimum(preferences, preferences.T)
 
 
 def resolve_score_type(preferences: NDArray[np.integer], score_type: ScoreType = ScoreType.auto) -> ScoreType:
     """Select arithmetic that represents every path edge; max-min never increases its maximum."""
     score_type = ScoreType(score_type)
     if score_type is ScoreType.saturated64 and np.any(preferences == np.iinfo(np.uint64).max):
-        raise OverflowError("Schulze input contains the saturation sentinel")
+        raise OverflowError("Schulze input reaches the overflow sentinel")
     if score_type is ScoreType.auto:
-        score_type = ScoreType.uint32 if np.max(preferences) <= np.iinfo(np.uint32).max else ScoreType.uint64
-    if np.max(preferences) > np.iinfo(np.dtype(f"uint{score_type.bits}")).max:
+        score_type = (
+            ScoreType.uint32 if np.max(preferences) <= np.iinfo(ScoreType.uint32.dtype).max else ScoreType.uint64
+        )
+    if np.max(preferences) > np.iinfo(score_type.dtype).max:
         raise OverflowError("Schulze edge exceeds the selected arithmetic type")
     return score_type
 
 
 # region Serial
+
+
+@njit
+def winning_votes_graph[Scalar: np.integer](preferences: NDArray[Scalar]) -> NDArray[Scalar]:
+    """Seeds the strongest paths with each pair's winning side, leaving losses, ties and the diagonal at zero."""
+    num_candidates = preferences.shape[0]
+    graph = np.zeros((num_candidates, num_candidates), dtype=preferences.dtype)
+    for row in range(num_candidates):
+        for column in range(num_candidates):
+            if row != column and preferences[row, column] > preferences[column, row]:
+                graph[row, column] = preferences[row, column]
+    return graph
 
 
 @njit
@@ -45,18 +69,7 @@ def compute_strongest_paths_serial[Scalar: np.integer](preferences: NDArray[Scal
     """
     num_candidates = preferences.shape[0]
 
-    strongest_paths = np.zeros((num_candidates, num_candidates), dtype=preferences.dtype)
-
-    # Step 1: Populate the strongest paths matrix based on direct comparisons
-    for source in range(num_candidates):
-        for target in range(num_candidates):
-            if source != target:
-                if preferences[source, target] > preferences[target, source]:
-                    strongest_paths[source, target] = preferences[source, target]
-                else:
-                    strongest_paths[source, target] = 0
-
-    # Step 2: Compute the strongest paths using Floyd-Warshall-like algorithm
+    strongest_paths = winning_votes_graph(preferences)
     for pivot in range(num_candidates):
         for source in range(num_candidates):
             if source != pivot:
@@ -81,46 +94,37 @@ def compute_strongest_paths_serial[Scalar: np.integer](preferences: NDArray[Scal
 
 @njit
 def process_tile_cpu(
-    output: NDArray[np.integer],
-    output_row: int,
-    output_column: int,
-    left: NDArray[np.integer],
-    left_row: int,
-    left_column: int,
-    right: NDArray[np.integer],
-    right_row: int,
-    right_column: int,
+    paths: NDArray[np.integer],
+    tile_row_start: int,
+    tile_column_start: int,
+    pivot_start: int,
     tile_size: int = TILE_SIZE,
 ) -> None:
     """
-    In-place computation of the widest path path using the Schulze method with tiling for better cache utilization.
-    For input of size (n x n), would perform (n) iterations of quadratic complexity each.
-
-    Time complexity: O(n^3), where n is the tile size.
-    Space complexity: O(n^2), where n is the tile size.
+    Relaxes the tile at (`tile_row_start`, `tile_column_start`) of `paths` through every pivot of
+    the tile column `pivot_start`, reading the to-pivot and from-pivot tiles from the same matrix.
     """
-
     # `njit` compiles with `boundscheck=False`, so the tail of a non-divisible matrix has
     # to be clamped here rather than trapped on access.
-    num_candidates = output.shape[0]
-    pivot_extent = min(tile_size, num_candidates - max(left_column, right_row))
-    row_extent = min(tile_size, num_candidates - max(output_row, left_row))
-    column_extent = min(tile_size, num_candidates - max(output_column, right_column))
+    num_candidates = paths.shape[0]
+    pivot_extent = min(tile_size, num_candidates - pivot_start)
+    row_extent = min(tile_size, num_candidates - tile_row_start)
+    column_extent = min(tile_size, num_candidates - tile_column_start)
 
     for pivot in range(pivot_extent):
+        pivot_index = pivot_start + pivot
         for row in range(row_extent):
+            row_index = tile_row_start + row
+            if row_index == pivot_index:
+                continue
+            to_pivot = paths[row_index, pivot_index]
             for column in range(column_extent):
-                if (
-                    (output_row + row != output_column + column)
-                    and (left_row + row != left_column + pivot)
-                    and (right_row + pivot != right_column + column)
-                ):
-                    replacement = min(
-                        left[left_row + row, left_column + pivot],
-                        right[right_row + pivot, right_column + column],
-                    )
-                    if replacement > output[output_row + row, output_column + column]:
-                        output[output_row + row, output_column + column] = replacement
+                column_index = tile_column_start + column
+                if row_index == column_index or pivot_index == column_index:
+                    continue
+                through_pivot = min(to_pivot, paths[pivot_index, column_index])
+                if through_pivot > paths[row_index, column_index]:
+                    paths[row_index, column_index] = through_pivot
 
 
 @njit(parallel=True)
@@ -129,106 +133,35 @@ def compute_strongest_paths_tiled_cpu[Scalar: np.integer](
     tile_size: int = TILE_SIZE,
 ) -> NDArray[Scalar]:
     """
-    Computes the widest path strengths using the Schulze method with tiling for better cache utilization.
-    This implementation not only parallelizes the outer loop but also tiles the computation, to maximize
-    the utilization of CPU caches.
+    Computes the widest path strengths in cache-sized tiles, three dependency phases per pivot tile,
+    parallelizing the tiles within each phase.
 
     Space complexity: O(n^2), where n is the number of candidates.
     Time complexity: O(n^3), where n is the number of candidates.
     """
     num_candidates = preferences.shape[0]
-
-    strongest_paths = np.zeros((num_candidates, num_candidates), dtype=preferences.dtype)
-
-    # Step 1: Populate the strongest paths matrix based on direct comparisons
-    for source in range(num_candidates):
-        for target in range(num_candidates):
-            if source != target:
-                if preferences[source, target] > preferences[target, source]:
-                    strongest_paths[source, target] = preferences[source, target]
-                else:
-                    strongest_paths[source, target] = 0
-
-    # Step 2: Compute the strongest paths using Floyd-Warshall-like algorithm with tiling
+    strongest_paths = winning_votes_graph(preferences)
     tiles_count = (num_candidates + tile_size - 1) // tile_size
     for pivot_tile in range(tiles_count):
-        # Dependent phase
         pivot_start = pivot_tile * tile_size
+        process_tile_cpu(strongest_paths, pivot_start, pivot_start, pivot_start, tile_size)
 
-        # f(S_kk, S_kk, S_kk)
-        process_tile_cpu(
-            strongest_paths,
-            pivot_start,
-            pivot_start,
-            strongest_paths,
-            pivot_start,
-            pivot_start,
-            strongest_paths,
-            pivot_start,
-            pivot_start,
-            tile_size,
-        )
-
-        # Partially dependent phase (first of two)
         for row_tile in prange(tiles_count):
-            if row_tile == pivot_tile:
-                continue
-            row_start = row_tile * tile_size
-            # f(S_ik, S_ik, S_kk)
-            process_tile_cpu(
-                strongest_paths,
-                row_start,
-                pivot_start,
-                strongest_paths,
-                row_start,
-                pivot_start,
-                strongest_paths,
-                pivot_start,
-                pivot_start,
-                tile_size,
-            )
+            if row_tile != pivot_tile:
+                process_tile_cpu(strongest_paths, row_tile * tile_size, pivot_start, pivot_start, tile_size)
 
-        # Partially dependent phase (second of two)
         for column_tile in prange(tiles_count):
-            if column_tile == pivot_tile:
-                continue
-            column_start = column_tile * tile_size
-            # f(S_kj, S_kk, S_kj)
-            process_tile_cpu(
-                strongest_paths,
-                pivot_start,
-                column_start,
-                strongest_paths,
-                pivot_start,
-                pivot_start,
-                strongest_paths,
-                pivot_start,
-                column_start,
-                tile_size,
-            )
+            if column_tile != pivot_tile:
+                process_tile_cpu(strongest_paths, pivot_start, column_tile * tile_size, pivot_start, tile_size)
 
-        # Independent phase
         for row_tile in prange(tiles_count):
             if row_tile == pivot_tile:
                 continue
-            row_start = row_tile * tile_size
             for column_tile in range(tiles_count):
-                if column_tile == pivot_tile:
-                    continue
-                column_start = column_tile * tile_size
-                # f(S_ij, S_ik, S_kj)
-                process_tile_cpu(
-                    strongest_paths,
-                    row_start,
-                    column_start,
-                    strongest_paths,
-                    row_start,
-                    pivot_start,
-                    strongest_paths,
-                    pivot_start,
-                    column_start,
-                    tile_size,
-                )
+                if column_tile != pivot_tile:
+                    process_tile_cpu(
+                        strongest_paths, row_tile * tile_size, column_tile * tile_size, pivot_start, tile_size
+                    )
 
     return strongest_paths
 

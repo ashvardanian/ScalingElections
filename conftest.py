@@ -14,11 +14,11 @@ from pathlib import Path
 from types import ModuleType
 
 import numpy as np
-from numpy.typing import NDArray
 import pytest
+from numpy.typing import NDArray
 
-from kemeny import KemenyResult
 from ballots import PairwiseCounts
+from kemeny import KemenyResult
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "build"))
 
@@ -102,9 +102,9 @@ def seed(__pytest_repeat_step_number: int | None) -> int:
 class Implementation:
     """One implementation and execution target exposing the common operations."""
 
-    tally_ballots: Callable[..., NDArray[np.uint16 | np.uint32 | np.uint64]]
+    tally_ballots: Callable[..., NDArray[np.uint64 | np.uint32 | np.uint16]]
     tally_pairwise_relations: Callable[..., PairwiseCounts]
-    compute_strongest_paths: Callable[..., NDArray[np.uint16 | np.uint32 | np.uint64]]
+    compute_strongest_paths: Callable[..., NDArray[np.uint64 | np.uint32 | np.uint16]]
     compute_kemeny_ranking: Callable[..., KemenyResult]
     enumerate_kemeny_rankings: Callable[..., Generator[list[int], None, None]]
     compute_split_cycle_winners: Callable[..., list[int]]

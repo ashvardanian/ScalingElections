@@ -6,7 +6,7 @@
  *  @see https://ashvardanian.com/posts/scaling-elections
  */
 #pragma once
-#include <csignal> // `std::signal`
+#include <csignal> // `std::sig_atomic_t`, `std::signal`, `std::raise`
 #include <cstdint> // `std::uint32_t`
 #include <cstdio>  // `std::printf`
 #include <cstdlib> // `std::rand`
@@ -18,12 +18,12 @@
 #include <numeric>     // `std::accumulate`
 #include <optional>    // `std::optional`, `std::nullopt`
 #include <stdexcept>   // `std::runtime_error`
-#include <string>      // `std::to_string`
+#include <format>      // `std::format`
+#include <string>      // `std::string`
 #include <string_view> // `std::string_view`
 #include <thread>      // `std::thread::hardware_concurrency()`
 #include <type_traits> // `std::integral_constant`, `std::is_same`, `std::type_identity_t`
 #include <vector>      // `std::vector`
-#include <version>     // `__cpp_lib_mdspan`
 
 #if defined(_OPENMP)
 #include <omp.h> // `omp_set_num_threads`
@@ -46,30 +46,20 @@
 #define SCALING_ELECTIONS_HOST_DEVICE
 #endif
 
-#if defined(__NVCC__)
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIP__)
+#define SCALING_ELECTIONS_WITH_HIP (1)
+#elif defined(__NVCC__)
 #define SCALING_ELECTIONS_WITH_CUDA (1)
 #endif
-#if defined(__HIP_PLATFORM_AMD__) || defined(__HIP__)
-#define SCALING_ELECTIONS_WITH_HIP  (1)
-#define SCALING_ELECTIONS_WITH_CUDA (1) // HIP is CUDA-compatible
+#if defined(SCALING_ELECTIONS_WITH_CUDA) || defined(SCALING_ELECTIONS_WITH_HIP)
+#define SCALING_ELECTIONS_WITH_GPU (1)
 #endif
 
 #if defined(SCALING_ELECTIONS_WITH_NEON)
 #include <arm_neon.h>
 #endif
 
-// A device compiler needs libcu++'s `mdspan`, which carries the `__device__` markers; a host-only
-// build takes the standard one where the library has it, and falls back to libcu++ where it does not.
-#if defined(SCALING_ELECTIONS_WITH_CUDA) || !defined(__cpp_lib_mdspan)
-#include <cuda/std/mdspan> // `cuda::std::mdspan`, `cuda::std::layout_stride`
-#include <cuda/std/span>   // `cuda::std::span`
-namespace shaped = cuda::std;
-#else
-#include <mdspan>
-namespace shaped = std;
-#endif
-
-#if defined(SCALING_ELECTIONS_WITH_CUDA) && !defined(SCALING_ELECTIONS_WITH_HIP)
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
 #include <cuda.h>         // `CUtensorMap`
 #include <cuda/barrier>   // `cuda::barrier`, `cuda::device::barrier_arrive_tx`
 #include <cuda/atomic>    // `cuda::atomic_ref`, `cuda::memory_order_relaxed`, `cuda::thread_scope`
@@ -80,54 +70,84 @@ namespace shaped = std;
 #include <hip/hip_runtime.h> // `hipMallocManaged`, `hipFree`, `hipDeviceProp_t`, `hipError_t`
 
 #if defined(__HIP_PLATFORM_AMD__)
-#define cudaError_t              hipError_t
-#define cudaSuccess              hipSuccess
-#define cudaGetDevice            hipGetDevice
-#define cudaGetDeviceProperties  hipGetDeviceProperties
-#define cudaDeviceProp           hipDeviceProp_t
-#define cudaMallocManaged        hipMallocManaged
-#define cudaFree                 hipFree
-#define cudaMemGetInfo           hipMemGetInfo
-#define cudaMemcpy               hipMemcpy
-#define cudaMemcpy2D             hipMemcpy2D
-#define cudaMemcpyDeviceToHost   hipMemcpyDeviceToHost
-#define cudaMemcpyHostToDevice   hipMemcpyHostToDevice
-#define cudaMemset               hipMemset
-#define cudaDeviceSynchronize    hipDeviceSynchronize
-#define cudaGetLastError         hipGetLastError
-#define cudaGetErrorString       hipGetErrorString
-#define cudaGetDeviceCount       hipGetDeviceCount
-#define cudaPointerAttributes    hipPointerAttribute_t
-#define cudaPointerGetAttributes hipPointerGetAttributes
-#define cudaMemoryTypeDevice     hipMemoryTypeDevice
-#define cudaMemoryTypeManaged    hipMemoryTypeManaged
+#define cudaError_t                                    hipError_t
+#define cudaSuccess                                    hipSuccess
+#define cudaGetDevice                                  hipGetDevice
+#define cudaGetDeviceProperties                        hipGetDeviceProperties
+#define cudaDeviceProp                                 hipDeviceProp_t
+#define cudaMallocManaged                              hipMallocManaged
+#define cudaFree                                       hipFree
+#define cudaMemGetInfo                                 hipMemGetInfo
+#define cudaMemcpy                                     hipMemcpy
+#define cudaMemcpy2D                                   hipMemcpy2D
+#define cudaMemcpyDeviceToHost                         hipMemcpyDeviceToHost
+#define cudaMemcpyHostToDevice                         hipMemcpyHostToDevice
+#define cudaMemset                                     hipMemset
+#define cudaDeviceSynchronize                          hipDeviceSynchronize
+#define cudaGetLastError                               hipGetLastError
+#define cudaGetErrorString                             hipGetErrorString
+#define cudaGetDeviceCount                             hipGetDeviceCount
+#define cudaPointerAttributes                          hipPointerAttribute_t
+#define cudaPointerGetAttributes                       hipPointerGetAttributes
+#define cudaMemoryTypeDevice                           hipMemoryTypeDevice
+#define cudaMemoryTypeManaged                          hipMemoryTypeManaged
+#define cudaOccupancyMaxActiveBlocksPerMultiprocessor  hipOccupancyMaxActiveBlocksPerMultiprocessor
+#define cudaOccupancyMaxPotentialBlockSize             hipOccupancyMaxPotentialBlockSize
+#define cudaOccupancyMaxPotentialBlockSizeVariableSMem hipOccupancyMaxPotentialBlockSizeVariableSMem
 
 #endif
 #endif
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300 && !defined(SCALING_ELECTIONS_WITH_HIP)
+#if defined(SCALING_ELECTIONS_WITH_CUDA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 300
 #define SCALING_ELECTIONS_KEPLER (1)
 #endif
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && !defined(SCALING_ELECTIONS_WITH_HIP)
+#if defined(SCALING_ELECTIONS_WITH_CUDA) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 #define SCALING_ELECTIONS_HOPPER (1)
 #endif
 
 /**
- *  The tile edge every backend is compiled for. Thirty-two fits a CPU L2 slice and matches an
- *  NVIDIA warp; edit and rebuild to compare other widths.
+ *  The tile edge every backend is compiled for, derived from the block limit: a GPU tile runs one
+ *  thread per cell, and 32 squared is the 1024 threads CUDA, HIP and Metal all cap a block at.
  */
 constexpr std::uint32_t tile_size_k = 32;
 
-using default_stored_count_t = std::uint32_t;
-using default_schulze_arithmetic_t = std::uint32_t;
-using default_kemeny_arithmetic_t = std::uint64_t;
 using rank_label_t = std::uint32_t;
 using ballot_offset_t = std::uint64_t;
 using voter_weight_t = std::uint64_t;
 using candidate_index_t = std::uint32_t;
+/** A rank label or an entry offset within a ballot, wide enough that its maximum marks an unranked candidate. */
+using rank_position_t = std::uint64_t;
+/** An entry of Pascal's triangle up to the widest Kemeny field, whose width sets that field. */
+using binomial_count_t = std::uint32_t;
+/** A set of candidates, one bit each, wide enough for every Kemeny field on every target. */
+using subset_mask_t = std::uint64_t;
 
 enum class backend_t : std::uint8_t { cpu_k, gpu_k };
-enum class score_type_t : std::uint8_t { auto_k, uint16_k, uint32_k, uint64_k, saturated64_k };
+enum class score_type_t : std::uint8_t { auto_k, saturated64_k, uint64_k, uint32_k, uint16_k };
+
+/** Polled between independent steps of a CPU solver, which throws once it reads non-zero. */
+using cancellation_t = volatile std::sig_atomic_t const*;
+
+/** Thrown by a CPU solver that observed its cancellation flag. */
+inline void throw_if_cancelled_(cancellation_t cancelled) {
+    if (cancelled && *cancelled) throw std::runtime_error("Stopped by signal");
+}
+
+#if defined(SCALING_ELECTIONS_WITH_OPENMP)
+
+/** The calling thread's place in the innermost OpenMP team. */
+inline unsigned openmp_thread_index_() noexcept { return static_cast<unsigned>(omp_get_thread_num()); }
+
+/** How many threads the innermost OpenMP team holds. */
+inline unsigned openmp_threads_count_() noexcept { return static_cast<unsigned>(omp_get_num_threads()); }
+
+#else
+
+inline unsigned openmp_thread_index_() noexcept { return 0; }
+
+inline unsigned openmp_threads_count_() noexcept { return 1; }
+
+#endif
 
 template <typename count_type_>
 struct saturated {
@@ -184,7 +204,7 @@ inline std::size_t checked_product(std::size_t count, std::size_t width) {
     return count * width;
 }
 
-#if defined(SCALING_ELECTIONS_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_GPU)
 enum class atomic_scope_t { block_k, device_k };
 
 // Barriers and kernel completion publish these counters; their updates need no ordering.
@@ -236,18 +256,27 @@ SCALING_ELECTIONS_HOST_DEVICE constexpr integer_type_ divide_round_up(
 
 #pragma region Shaped Views
 
-/** A two-dimensional view whose row stride travels with its extents rather than beside them. */
+/** A two-dimensional view of @p rows by @p columns cells whose rows sit @p stride elements apart. */
 template <typename element_type_, typename index_type_ = std::size_t>
-using strided_matrix = shaped::mdspan<element_type_, shaped::dextents<index_type_, 2>, shaped::layout_stride>;
+struct strided_matrix {
+    using element_t = element_type_;
+    using index_t = index_type_;
 
-/** The extents a matrix of vote counts is addressed by. */
-using matrix_extents_t = shaped::dextents<std::size_t, 2>;
+    element_t* data;
+    index_t rows;
+    index_t columns;
+    index_t stride;
 
-/** A writable view over a matrix of vote counts. */
-using uint32_matrix_t = strided_matrix<std::uint32_t>;
+    SCALING_ELECTIONS_HOST_DEVICE element_t& operator()(index_t row, index_t column) const noexcept {
+        return data[static_cast<std::size_t>(row) * stride + column];
+    }
 
-/** A read-only view over a matrix of vote counts. */
-using const_uint32_matrix_t = strided_matrix<std::uint32_t const>;
+    SCALING_ELECTIONS_HOST_DEVICE operator strided_matrix<element_t const, index_t>() const noexcept
+        requires(!std::is_const_v<element_t>)
+    {
+        return {data, rows, columns, stride};
+    }
+};
 
 /** A read-only view over a chunk of complete rankings, one ballot to a row, best candidate first. */
 using ballots_t = strided_matrix<candidate_index_t const, std::size_t>;
@@ -257,11 +286,7 @@ template <typename element_type_, typename index_type_ = std::size_t>
 inline strided_matrix<element_type_, index_type_> strided_view( //
     element_type_* data, std::type_identity_t<index_type_> rows, std::type_identity_t<index_type_> columns,
     std::type_identity_t<index_type_> stride) noexcept {
-    using index_t = index_type_;
-
-    using extents_t = shaped::dextents<index_t, 2>;
-    using mapping_t = shaped::layout_stride::mapping<extents_t>;
-    return {data, mapping_t {extents_t {rows, columns}, shaped::array<index_t, 2> {stride, index_t {1}}}};
+    return {data, rows, columns, stride};
 }
 
 /** Views @p data as @p edge by @p edge cells whose rows sit @p stride apart. */
@@ -273,14 +298,29 @@ inline strided_matrix<element_type_, index_type_> square_view( //
 
 #pragma endregion Shaped Views
 
-#if defined(SCALING_ELECTIONS_WITH_CUDA)
+#if defined(SCALING_ELECTIONS_WITH_GPU)
 
-/** Lanes in one warp, which is the unit a ballot's pairs are split across. */
-#if defined(SCALING_ELECTIONS_WITH_HIP)
-constexpr std::uint32_t warp_size_k = 64;
-#else
-constexpr std::uint32_t warp_size_k = 32;
-#endif
+/** Properties of the device the calling thread launches on. */
+inline cudaDeviceProp current_device_properties_() {
+    int device = 0;
+    cudaDeviceProp device_properties;
+    if (cudaGetDevice(&device) != cudaSuccess || cudaGetDeviceProperties(&device_properties, device) != cudaSuccess)
+        throw std::runtime_error("No CUDA devices available");
+    return device_properties;
+}
+
+/** Blocks of @p kernel that stay resident on the whole device at once, which is all a grid-stride launch uses. */
+template <typename kernel_type_>
+inline unsigned resident_blocks_(kernel_type_ kernel, int block_size, std::size_t shared_bytes) {
+    cudaDeviceProp const device_properties = current_device_properties_();
+    int blocks_per_multiprocessor = 0;
+    if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_multiprocessor, kernel, block_size, shared_bytes) !=
+            cudaSuccess ||
+        blocks_per_multiprocessor == 0)
+        throw std::runtime_error("A kernel block does not fit this device");
+    return static_cast<unsigned>(
+        std::min(blocks_per_multiprocessor * device_properties.multiProcessorCount, device_properties.maxGridSize[0]));
+}
 
 /** Draws from CUDA's unified memory, so one allocation is addressable from both the host and the device. */
 template <typename value_type_>

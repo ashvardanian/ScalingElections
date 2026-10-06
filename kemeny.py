@@ -4,17 +4,19 @@ The optimum is found by subset dynamic programming, so the cost is exponential i
 number of candidates rather than approximate.
 """
 
+import math
 import os
 import sys
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from enum import StrEnum
 from typing import NamedTuple
 
 import numpy as np
 from numba import get_num_threads, njit, prange
+from numba.cpython.unsafe.numbers import trailing_zeros
 from numpy.typing import NDArray
 
-from ballots import Arithmetic, ScoreType, add_scores, saturated_sum, saturating_add
+from ballots import CountScalar, ScoreType, saturated_sum
 
 
 class RankingMultiplicity(StrEnum):
@@ -39,11 +41,18 @@ class KemenyResult(NamedTuple):
     """Whether the complete optimal ordering is unique."""
 
 
-KEMENY_MAX_CANDIDATES = 33
-"""The widest field an exact table can address, bounded by memory rather than by time."""
+BinomialCount = np.uint32
+"""One entry of Pascal's triangle, which counts the subsets in one layer of the cost table."""
 
-KEMENY_HOST_HEADROOM = 1 << 30
-"""Host memory the tables must leave behind for the rest of the machine."""
+KEMENY_MAX_CANDIDATES = max(
+    num_candidates
+    for num_candidates in range(1, 2 * np.iinfo(BinomialCount).bits)
+    if math.comb(num_candidates, num_candidates // 2) <= np.iinfo(BinomialCount).max
+)
+"""The widest field whose widest layer a `BinomialCount` can still count; memory decides the rest at runtime."""
+
+SubsetMask = np.uint64
+"""A set of candidates, bit `c` marking candidate `c`; numba kernels hold it in a plain `int`."""
 
 
 # region Subset Sums
@@ -51,8 +60,8 @@ KEMENY_HOST_HEADROOM = 1 << 30
 
 @njit(cache=True)
 def kemeny_subset_sums(
-    preferences: NDArray[np.integer], low_bits: int, arithmetic: Arithmetic = Arithmetic.exact
-) -> tuple[NDArray[np.integer], NDArray[np.integer]]:
+    counts: NDArray[CountScalar], low_bits: int, add: Callable[[CountScalar, CountScalar], CountScalar]
+) -> tuple[NDArray[CountScalar], NDArray[CountScalar]]:
     """
     Tabulates, for each candidate, the votes it loses to every subset of the others.
 
@@ -62,37 +71,37 @@ def kemeny_subset_sums(
     Space complexity: O(n * 2^(n/2)), where n is the number of candidates.
     Time complexity: O(n * 2^(n/2)), where n is the number of candidates.
     """
-    num_candidates = preferences.shape[0]
+    num_candidates = counts.shape[0]
     high_bits = num_candidates - low_bits
-    low = np.zeros((num_candidates, 1 << low_bits), dtype=preferences.dtype)
-    high = np.zeros((num_candidates, 1 << high_bits), dtype=preferences.dtype)
+    low = np.zeros((num_candidates, 1 << low_bits), dtype=counts.dtype)
+    high = np.zeros((num_candidates, 1 << high_bits), dtype=counts.dtype)
     for candidate in range(num_candidates):
         for offset in range(low_bits):
             bit = 1 << offset
-            votes = preferences[candidate, offset]
+            votes = counts[candidate, offset]
             for subset in range(bit, 1 << low_bits):
                 if subset & bit:
-                    low[candidate, subset] = add_scores(low[candidate, subset ^ bit], votes, arithmetic)
+                    low[candidate, subset] = add(low[candidate, subset ^ bit], votes)
         for offset in range(high_bits):
             bit = 1 << offset
-            votes = preferences[candidate, low_bits + offset]
+            votes = counts[candidate, low_bits + offset]
             for subset in range(bit, 1 << high_bits):
                 if subset & bit:
-                    high[candidate, subset] = add_scores(high[candidate, subset ^ bit], votes, arithmetic)
+                    high[candidate, subset] = add(high[candidate, subset ^ bit], votes)
     return low, high
 
 
 @njit(cache=True)
 def kemeny_votes_against(
-    low: NDArray[np.integer],
-    high: NDArray[np.integer],
+    low: NDArray[CountScalar],
+    high: NDArray[CountScalar],
     low_bits: int,
     candidate: int,
     subset: int,
-    arithmetic: Arithmetic = Arithmetic.exact,
-) -> np.uint64:
+    add: Callable[[CountScalar, CountScalar], CountScalar],
+) -> CountScalar:
     """Votes that preferred this candidate to every member of the subset."""
-    return add_scores(low[candidate, subset & ((1 << low_bits) - 1)], high[candidate, subset >> low_bits], arithmetic)
+    return add(low[candidate, subset & ((1 << low_bits) - 1)], high[candidate, subset >> low_bits])
 
 
 # endregion Subset Sums
@@ -104,7 +113,7 @@ def kemeny_votes_against(
 @njit(cache=True)
 def kemeny_binomials(num_candidates: int) -> NDArray[np.integer]:
     """Pascal's triangle, whose last row counts the subsets seating each number of candidates."""
-    binomials = np.zeros((num_candidates + 1, num_candidates + 1), dtype=np.int64)
+    binomials = np.zeros((num_candidates + 1, num_candidates + 1), dtype=BinomialCount)
     for upper in range(num_candidates + 1):
         binomials[upper, 0] = 1
         for lower in range(1, upper + 1):
@@ -130,46 +139,71 @@ def kemeny_unrank_colex(binomials: NDArray[np.integer], num_candidates: int, sea
 
 
 @njit(cache=True)
-def kemeny_next_subset(subset: int) -> int:
+def kemeny_next_colex(subset: int) -> int:
     """The next mask of the same population count, which is the next subset in colex order."""
-    lowest = subset & -subset
-    rippled = subset + lowest
-    return rippled | (((subset ^ rippled) >> 2) // lowest)
+    rippled = subset + (subset & -subset)
+    return rippled | ((rippled ^ subset) >> (2 + trailing_zeros(subset)))
+
+
+@njit(cache=True)
+def kemeny_seat_last(
+    costs: NDArray[CountScalar],
+    low: NDArray[CountScalar],
+    high: NDArray[CountScalar],
+    low_bits: int,
+    candidate: int,
+    rest: int,
+    add: Callable[[CountScalar, CountScalar], CountScalar],
+) -> CountScalar:
+    """The cost of seating `candidate` after `rest`, which adds the votes that preferred it to each of them."""
+    return add(costs[rest], kemeny_votes_against(low, high, low_bits, candidate, rest, add))
+
+
+@njit(cache=True)
+def kemeny_seat_first(
+    costs: NDArray[CountScalar],
+    counts: NDArray[CountScalar],
+    candidate: int,
+    add: Callable[[CountScalar, CountScalar], CountScalar],
+) -> CountScalar:
+    """The cost of the best ordering that seats `candidate` first, ahead of everyone who outvoted it."""
+    num_candidates = counts.shape[0]
+    score = costs[((1 << num_candidates) - 1) ^ (1 << candidate)]
+    for other in range(num_candidates):
+        score = add(score, counts[other, candidate])
+    return score
 
 
 @njit(parallel=True)
 def kemeny_costs(
-    preferences: NDArray[np.integer],
+    counts: NDArray[CountScalar],
     low_bits: int,
-    low: NDArray[np.integer],
-    high: NDArray[np.integer],
-    score_type: type[np.unsignedinteger],
-    arithmetic: Arithmetic = Arithmetic.exact,
-) -> NDArray[np.integer]:
+    low: NDArray[CountScalar],
+    high: NDArray[CountScalar],
+    costs: NDArray[CountScalar],
+    add: Callable[[CountScalar, CountScalar], CountScalar],
+) -> None:
     """
-    Computes the least disagreement achievable for every subset of candidates.
+    Fills `costs` with the least disagreement achievable for every subset of candidates.
 
-    Entry `subset` is the score of the best ordering of those candidates in the leading seats,
+    Entry `subset`, a `SubsetMask`, is the score of the best ordering of those candidates in the leading seats,
     counting only the pairs inside it. Clearing a bit drops the population count by exactly one,
     so one population count depends only on the one below and its subsets all fill at once.
 
     Space complexity: O(2^n), where n is the number of candidates.
     Time complexity: O(n * 2^n), where n is the number of candidates.
     """
-    num_candidates = preferences.shape[0]
+    num_candidates = counts.shape[0]
     binomials = kemeny_binomials(num_candidates)
-    states = 1 << num_candidates
-
-    costs = np.empty(states, dtype=score_type)
     costs[0] = 0
-    unreachable = score_type(np.iinfo(score_type).max)
+    unreachable = np.iinfo(costs.dtype).max
     for seated in range(1, num_candidates + 1):
         layer_states = binomials[num_candidates, seated]
-        # Unranking walks the whole field, so a chunk pays it once and steps through the rest.
-        chunks = min(get_num_threads() * 8, layer_states)
-        for chunk in prange(chunks):
-            first = chunk * layer_states // chunks
-            last = (chunk + 1) * layer_states // chunks
+        # Every subset costs the same, so one equal slice per thread unranks once and steps through the rest.
+        slices = min(get_num_threads(), layer_states)
+        for slice_index in prange(slices):
+            first = slice_index * layer_states // slices
+            last = (slice_index + 1) * layer_states // slices
             subset = kemeny_unrank_colex(binomials, num_candidates, seated, first)
             for _ in range(first, last):
                 best = unreachable
@@ -177,21 +211,12 @@ def kemeny_costs(
                     bit = 1 << candidate
                     if not subset & bit:
                         continue
-                    # Seating this candidate last within the subset costs the votes that preferred
-                    # it to each of the others.
                     rest = subset ^ bit
-                    score = score_type(
-                        add_scores(
-                            costs[rest],
-                            kemeny_votes_against(low, high, low_bits, candidate, rest, arithmetic),
-                            arithmetic,
-                        )
-                    )
+                    score = kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add)
                     if score < best:
                         best = score
                 costs[subset] = best
-                subset = kemeny_next_subset(subset)
-    return costs
+                subset = kemeny_next_colex(subset)
 
 
 # endregion Cost Table
@@ -204,7 +229,7 @@ def kemeny_table_bytes(num_candidates: int, score_type: ScoreType = ScoreType.ui
     """Bytes the cost table and both subset-sum tables occupy at this width."""
     low_bits = num_candidates // 2
     sums_states = num_candidates * ((1 << low_bits) + (1 << (num_candidates - low_bits)))
-    return ((1 << num_candidates) + sums_states) * np.dtype(f"uint{score_type.bits}").itemsize
+    return ((1 << num_candidates) + sums_states) * np.dtype(score_type.dtype).itemsize
 
 
 def available_host_bytes() -> int:
@@ -219,16 +244,16 @@ def resolve_score_type(preferences: NDArray[np.integer], score_type: ScoreType =
     """Select a width that represents every intermediate score, reserving its maximum as a sentinel."""
     num_candidates = preferences.shape[0]
     if num_candidates < 1 or num_candidates > KEMENY_MAX_CANDIDATES:
-        raise ValueError(f"Kemeny is exact to {KEMENY_MAX_CANDIDATES} candidates")
+        raise ValueError(f"Kemeny is exact from 1 to {KEMENY_MAX_CANDIDATES} candidates")
 
     score_type = ScoreType(score_type)
     bound = int(saturated_sum(np.maximum(preferences, preferences.T)[np.triu_indices(num_candidates, 1)]))
     if score_type is ScoreType.auto:
-        if bound < np.iinfo(np.uint32).max:
+        if bound < np.iinfo(ScoreType.uint32.dtype).max:
             score_type = ScoreType.uint32
         else:
-            score_type = ScoreType.uint64 if bound < np.iinfo(np.uint64).max else ScoreType.saturated64
-    if score_type is not ScoreType.saturated64 and bound >= (1 << score_type.bits) - 1:
+            score_type = ScoreType.uint64 if bound < np.iinfo(ScoreType.uint64.dtype).max else ScoreType.saturated64
+    if score_type is not ScoreType.saturated64 and bound >= np.iinfo(score_type.dtype).max:
         raise OverflowError("Kemeny score bound exceeds the selected arithmetic type")
 
     return score_type
@@ -236,35 +261,33 @@ def resolve_score_type(preferences: NDArray[np.integer], score_type: ScoreType =
 
 def _kemeny_tables(
     preferences: NDArray[np.integer], score_type: ScoreType
-) -> tuple[NDArray[np.integer], NDArray[np.integer], NDArray[np.integer]]:
-    """Build arithmetic-width subset sums and costs within the host memory budget."""
+) -> tuple[NDArray[CountScalar], NDArray[CountScalar], NDArray[CountScalar], NDArray[CountScalar]]:
+    """Build the costs, the score-typed counts, and both subset-sum tables, refusing what memory cannot hold."""
     num_candidates = preferences.shape[0]
-    score_dtype = np.dtype(f"uint{score_type.bits}").type
 
     # NumPy reports an unaffordable table as a bare `MemoryError`, so the size is refused by name here.
     wanted_bytes = kemeny_table_bytes(num_candidates, score_type)
     free_bytes = available_host_bytes()
-    if wanted_bytes + KEMENY_HOST_HEADROOM > free_bytes:
+    if wanted_bytes > free_bytes:
         raise MemoryError(
             f"Kemeny over {num_candidates} candidates wants {wanted_bytes >> 20} MiB of host memory, "
             f"of which {free_bytes >> 20} MiB is free"
         )
 
-    counts = preferences.astype(score_dtype)
+    counts = preferences.astype(score_type.dtype)
     np.fill_diagonal(counts, 0)
     low_bits = num_candidates // 2
-    arithmetic = Arithmetic.saturated if score_type is ScoreType.saturated64 else Arithmetic.exact
-    low, high = kemeny_subset_sums(counts, low_bits, arithmetic)
-    costs = kemeny_costs(counts, low_bits, low, high, score_dtype, arithmetic)
-
-    return costs, low, high
+    low, high = kemeny_subset_sums(counts, low_bits, score_type.addition)
+    costs = np.empty(1 << num_candidates, dtype=score_type.dtype)
+    kemeny_costs(counts, low_bits, low, high, costs, score_type.addition)
+    return costs, counts, low, high
 
 
 def compute_kemeny_costs(
     preferences: NDArray[np.integer], *, score_type: ScoreType = ScoreType.auto
 ) -> NDArray[np.integer]:
     """Retain one cost per subset for lazy enumeration of every optimum."""
-    costs, _, _ = _kemeny_tables(preferences, resolve_score_type(preferences, score_type))
+    costs, _, _, _ = _kemeny_tables(preferences, resolve_score_type(preferences, score_type))
     return costs
 
 
@@ -281,20 +304,16 @@ def compute_kemeny_ranking(preferences: NDArray[np.integer], *, score_type: Scor
     """
     num_candidates = preferences.shape[0]
     score_type = resolve_score_type(preferences, score_type)
-    costs, low, high = _kemeny_tables(preferences, score_type)
-    arithmetic = Arithmetic.saturated if score_type is ScoreType.saturated64 else Arithmetic.exact
+    costs, counts, low, high = _kemeny_tables(preferences, score_type)
+    add = score_type.addition
     low_bits = num_candidates // 2
 
     full = (1 << num_candidates) - 1
-    optimum = int(costs[full])
-    if optimum == np.iinfo(np.uint64).max:
-        raise OverflowError("The optimal Kemeny score exceeds the representable range")
+    optimum = costs[full]
+    if optimum == np.iinfo(costs.dtype).max:
+        raise OverflowError("Kemeny optimum reaches the overflow sentinel")
     winners = [
-        candidate
-        for candidate in range(num_candidates)
-        if int(costs[full ^ (1 << candidate)])
-        + sum(int(preferences[other, candidate]) for other in range(num_candidates) if other != candidate)
-        == optimum
+        candidate for candidate in range(num_candidates) if kemeny_seat_first(costs, counts, candidate, add) == optimum
     ]
     ranking = []
     multiplicity = RankingMultiplicity.unique
@@ -306,9 +325,7 @@ def compute_kemeny_ranking(preferences: NDArray[np.integer], *, score_type: Scor
             if not subset & bit:
                 continue
             rest = subset ^ bit
-            against = kemeny_votes_against(low, high, low_bits, candidate, rest, arithmetic)
-            score = saturating_add(np.uint64(costs[rest]), np.uint64(against))
-            if int(costs[subset]) == int(score):
+            if costs[subset] == kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add):
                 choices.append(candidate)
         if not choices:
             raise RuntimeError("The Kemeny cost table disagrees with its own sums")
@@ -318,7 +335,7 @@ def compute_kemeny_ranking(preferences: NDArray[np.integer], *, score_type: Scor
         ranking.append(candidate)
         subset ^= 1 << candidate
     ranking.reverse()
-    return KemenyResult(ranking, optimum, winners, multiplicity)
+    return KemenyResult(ranking, int(optimum), winners, multiplicity)
 
 
 def _enumerate_kemeny_rankings(
@@ -331,6 +348,7 @@ def _enumerate_kemeny_rankings(
     candidates = [candidate for candidate in range(len(preferences)) if subset & (1 << candidate)]
     for candidate in candidates:
         remaining = subset ^ (1 << candidate)
+        # Exact integers agree with both exact and saturated tables on every subset an optimum passes through.
         score = int(costs[remaining]) + sum(
             int(preferences[rival, candidate]) for rival in candidates if rival != candidate
         )
