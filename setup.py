@@ -103,7 +103,14 @@ def device_flags(name: Toolkit, architectures: list[str]) -> list[str]:
             gencodes = [f"-gencode=arch=compute_{code},code=sm_{code}" for code in architectures]
             gencodes.append(f"-gencode=arch=compute_{architectures[-1]},code=compute_{architectures[-1]}")
             host_compiler = os.environ.get("CUDAHOSTCXX", "g++")
-            return ["-ccbin", host_compiler, *gencodes, "-Xcompiler", "-fPIC,-fopenmp,-march=native"]
+            return [
+                "-ccbin",
+                host_compiler,
+                "--expt-relaxed-constexpr",
+                *gencodes,
+                "-Xcompiler",
+                "-fPIC,-fopenmp,-march=native",
+            ]
         case Toolkit.hip:
             return [f"--offload-arch={','.join(architectures)}", "-fPIC", "-fopenmp", "-D__HIP_PLATFORM_AMD__"]
     raise ValueError(f"{name} has no device driver")

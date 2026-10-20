@@ -75,7 +75,7 @@ __global__ void tally_ballots_cuda_(ballots_t rankings, strided_matrix<arithmeti
     candidate_index_t const num_candidates = preferences.rows;
     std::size_t const cells = static_cast<std::size_t>(num_candidates) * num_candidates;
 
-    extern __shared__ alignas(16) std::byte tally_shared_[];
+    alignas(16) extern __shared__ std::byte tally_shared_[];
     arithmetic_t* const counters = reinterpret_cast<arithmetic_t*>(tally_shared_);
     for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x) counters[cell] = arithmetic_t {0};
     __syncthreads();
