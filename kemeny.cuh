@@ -287,9 +287,9 @@ inline std::vector<arithmetic_type_> compute_kemeny_costs_cpu(
             subset_mask_t subset = kemeny_unrank_colex_(binomial_view, seated, first_rank);
             for (binomial_count_t rank = first_rank; rank < last_rank; rank++, subset = kemeny_next_colex_(subset)) {
                 arithmetic_t best = std::numeric_limits<arithmetic_t>::max();
-                for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
+                for (subset_mask_t members = subset; members; members &= members - 1) {
+                    candidate_index_t const candidate = static_cast<candidate_index_t>(std::countr_zero(members));
                     subset_mask_t const bit = subset_mask_t {1} << candidate;
-                    if (!(subset & bit)) continue;
                     // Seating this candidate last within the subset costs the votes that preferred
                     // it to each of the others.
                     subset_mask_t const rest = subset ^ bit;
