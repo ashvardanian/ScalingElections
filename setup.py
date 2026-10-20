@@ -99,9 +99,15 @@ def device_flags(name: Toolkit, architectures: list[str]) -> list[str]:
     """Code-generation and host-compiler flags for one device driver."""
     match name:
         case Toolkit.cuda:
-            # SASS for every target and PTX only for the newest, so newer drivers can JIT forward.
-            gencodes = [f"-gencode=arch=compute_{code},code=sm_{code}" for code in architectures]
-            gencodes.append(f"-gencode=arch=compute_{architectures[-1]},code=compute_{architectures[-1]}")
+            if "native" in architectures:
+                if architectures != ["native"]:
+                    raise ValueError("CUDA target 'native' must be used on its own")
+                # NVCC detects the visible devices and emits SASS only for their architectures.
+                gencodes = ["-arch=native"]
+            else:
+                # SASS for every target and PTX only for the newest, so newer drivers can JIT forward.
+                gencodes = [f"-gencode=arch=compute_{code},code=sm_{code}" for code in architectures]
+                gencodes.append(f"-gencode=arch=compute_{architectures[-1]},code=compute_{architectures[-1]}")
             host_compiler = os.environ.get("CUDAHOSTCXX", "g++")
             return ["-ccbin", host_compiler, *gencodes, "-Xcompiler", "-fPIC,-fopenmp,-march=native"]
         case Toolkit.hip:
