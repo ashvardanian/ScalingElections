@@ -415,7 +415,22 @@ inline managed_vector<arithmetic_type_> compute_kemeny_costs_gpu(
     auto const binomial_view = square_view<binomial_count_t const, candidate_index_t>(
         binomials.data(), binomials_stride, binomials_stride);
 
-    // Zeroes the empty subset the first layer reads, and faults the table's pages onto the device.
+#if defined(SCALING_ELECTIONS_WITH_CUDA)
+    // Place the managed table on the device before the clear, rather than faulting it there on demand.
+    if (current_device_properties_().concurrentManagedAccess) {
+        int device = 0;
+        if (cudaGetDevice(&device) != cudaSuccess) throw std::runtime_error("Failed to query the current device");
+#if CUDART_VERSION >= 13000
+        cudaMemLocation const location {cudaMemLocationTypeDevice, device};
+        cudaError_t const error = cudaMemPrefetchAsync(costs.data(), states * sizeof(arithmetic_t), location, 0);
+#else
+        cudaError_t const error = cudaMemPrefetchAsync(costs.data(), states * sizeof(arithmetic_t), device);
+#endif
+        if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    }
+#endif
+
+    // Zeroes the empty subset the first layer reads and commits the table's remaining pages.
     if (cudaMemset(costs.data(), 0, states * sizeof(arithmetic_t)) != cudaSuccess)
         throw std::runtime_error("Failed to clear device memory");
 
