@@ -307,6 +307,28 @@ def test_kemeny_solves_a_disagreement_wider_than_thirty_two_bits(
         kemeny.compute_kemeny_ranking(preferences, score_type=ScoreType.uint32)
 
 
+@pytest.mark.parametrize("num_candidates", [7, 8, 9, 15, 16, 17])
+@pytest.mark.parametrize("tied", [False, True])
+def test_kemeny_complete_cost_tables(num_candidates: int, tied: bool, implementation: Implementation) -> None:
+    """Every subset has its closed-form cost under complete ties or unanimous strict preferences."""
+    preferences = np.full((num_candidates, num_candidates), 7, dtype=np.uint32)
+    np.fill_diagonal(preferences, 0)
+    if not tied:
+        preferences = np.triu(preferences, k=1)
+    population = np.bitwise_count(np.arange(1 << num_candidates, dtype=np.uint64)).astype(np.int64)
+    expected = 7 * population * (population - 1) // 2 if tied else np.zeros(1 << num_candidates, dtype=np.int64)
+    keywords = implementation.enumerate_kemeny_rankings.keywords
+    module = scalingelections._resolve(**keywords)
+    for score_type in (ScoreType.saturated64, ScoreType.uint64, ScoreType.uint32, ScoreType.uint16):
+        costs = (
+            kemeny.compute_kemeny_costs(preferences, score_type=score_type)
+            if module is None
+            else module._compute_kemeny_costs(preferences, backend=keywords["backend"], score_type=score_type.value)
+        )
+        assert costs.dtype == score_type.dtype
+        assert np.array_equal(costs, expected)
+
+
 def test_kemeny_score_widths_preserve_the_optimum(implementation: Implementation) -> None:
     """Supported arithmetic widths agree and ignore diagonal counts."""
     preferences = PROFILES["random_7"].copy()
