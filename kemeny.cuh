@@ -189,8 +189,8 @@ inline subset_mask_t kemeny_next_colex_(subset_mask_t subset) noexcept {
 /**
  *  @brief Walks a completed cost table back out into a ranking, best candidate first.
  *
- *  Every backend fills the same table, so recovering the ranking in one place is also what
- *  keeps their tie-breaking identical. Every partial score stays within the validated bound, so
+ *  Every backend fills the same table and walks it this way, taking the lowest matching candidate,
+ *  which keeps their tie-breaking identical. Every partial score stays within the validated bound, so
  *  the exact widths need no saturation here.
  */
 template <tally_arithmetic arithmetic_type_, typename stored_count_type_>
@@ -326,6 +326,20 @@ struct kemeny_device_sums {
     }
 };
 
+/** Views @p values , every low half before every high half as @p sums lays them out, the way a kernel reads them. */
+template <tally_arithmetic arithmetic_type_>
+inline kemeny_device_sums<arithmetic_type_> kemeny_device_view_(arithmetic_type_ const* values,
+                                                                kemeny_sums<arithmetic_type_> const& sums) noexcept {
+    using arithmetic_t = arithmetic_type_;
+    candidate_index_t const num_candidates = static_cast<candidate_index_t>(sums.low.size() / sums.low_states);
+    return {
+        strided_view<arithmetic_t const, candidate_index_t>(values, num_candidates, sums.low_states, sums.low_states),
+        strided_view<arithmetic_t const, candidate_index_t>(values + sums.low.size(), num_candidates, sums.high_states,
+                                                            sums.high_states),
+        sums.low_bits,
+    };
+}
+
 /** Scores seating one candidate last, keeping whichever of the two orderings costs less. */
 template <tally_arithmetic arithmetic_type_>
 __forceinline__ __device__ arithmetic_type_ kemeny_relax_(arithmetic_type_ rest, arithmetic_type_ against,
@@ -365,6 +379,48 @@ __global__ void kemeny_layer_cuda_(                                      //
 }
 
 /**
+ *  @brief Walks a completed device cost table into @p trace on one thread, so the table never leaves the device.
+ *
+ *  The `2n + 2` words of @p trace hold the ranking best first, then the optimum, the multiplicity, and
+ *  one winner flag per candidate. The walk is `kemeny_trace_`'s, so ties break the same way on either
+ *  processor. A subset no member explains gets @p num_candidates in place of a candidate.
+ */
+template <tally_arithmetic arithmetic_type_>
+__global__ void kemeny_trace_cuda_(kemeny_device_sums<arithmetic_type_> sums, arithmetic_type_ const* costs,
+                                   candidate_index_t num_candidates, std::uint64_t* trace) {
+    using arithmetic_t = arithmetic_type_;
+    subset_mask_t const everyone = (subset_mask_t {1} << num_candidates) - 1;
+    arithmetic_t const optimum = costs[everyone];
+    trace[num_candidates] = static_cast<std::uint64_t>(optimum);
+    if (optimum == std::numeric_limits<arithmetic_t>::max()) return;
+
+    trace[num_candidates + 1] = static_cast<std::uint64_t>(ranking_multiplicity_t::unique_k);
+    for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
+        subset_mask_t const bit = subset_mask_t {1} << candidate;
+        arithmetic_t score = costs[everyone ^ bit];
+        for (candidate_index_t other = 0; other < num_candidates; other++)
+            if (other != candidate) score += sums.against(other, bit);
+        trace[num_candidates + 2 + candidate] = score == optimum;
+    }
+
+    subset_mask_t subset = everyone;
+    for (candidate_index_t place = num_candidates; place-- > 0;) {
+        candidate_index_t chosen = num_candidates;
+        for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
+            subset_mask_t const bit = subset_mask_t {1} << candidate;
+            if (!(subset & bit)) continue;
+            subset_mask_t const rest = subset ^ bit;
+            if (costs[subset] != costs[rest] + sums.against(candidate, rest)) continue;
+            if (chosen == num_candidates) chosen = candidate;
+            else trace[num_candidates + 1] = static_cast<std::uint64_t>(ranking_multiplicity_t::multiple_k);
+        }
+        trace[place] = chosen;
+        if (chosen == num_candidates) return;
+        subset ^= subset_mask_t {1} << chosen;
+    }
+}
+
+/**
  *  @brief Fills the exact Kemeny-Young subset cost table on a CUDA or @b HIP device.
  *
  *  One launch per population count, because subsets of one width depend only on the width below
@@ -373,9 +429,10 @@ __global__ void kemeny_layer_cuda_(                                      //
  *
  *  @param[in] preferences The pairwise preference matrix.
  *  @param[in] sums The split subset sums built from the same matrix.
+ *  @return The device table, then the device copy of @p sums that tracing it reads.
  */
 template <tally_arithmetic arithmetic_type_, typename stored_count_type_>
-inline managed_vector<arithmetic_type_> compute_kemeny_costs_gpu(
+inline std::pair<device_vector<arithmetic_type_>, device_vector<arithmetic_type_>> kemeny_fill_gpu_(
     strided_matrix<stored_count_type_ const, candidate_index_t> preferences,
     kemeny_sums<arithmetic_type_> const& sums) {
     using arithmetic_t = arithmetic_type_;
@@ -387,7 +444,7 @@ inline managed_vector<arithmetic_type_> compute_kemeny_costs_gpu(
     std::size_t const wanted_bytes = (states + sums_states) * sizeof(arithmetic_t) +
                                      host_binomials.size() * sizeof(binomial_count_t);
 
-    // Managed memory oversubscribes rather than failing, so an unaffordable table is refused here.
+    // An unaffordable table is refused up front, with a message naming the shortfall.
     std::size_t free_bytes = 0;
     [[maybe_unused]] std::size_t total_bytes = 0;
     if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess)
@@ -397,26 +454,23 @@ inline managed_vector<arithmetic_type_> compute_kemeny_costs_gpu(
             std::format("Kemeny over {} candidates wants {} MiB of device memory, of which {} MiB is free",
                         num_candidates, wanted_bytes >> 20, free_bytes >> 20));
 
-    managed_vector<arithmetic_t> costs(states);
-    managed_vector<arithmetic_t> device_sums(sums_states);
-    managed_vector<binomial_count_t> binomials(host_binomials.size());
+    device_vector<arithmetic_t> costs(states);
+    device_vector<arithmetic_t> device_sums(sums_states);
+    device_vector<binomial_count_t> binomials(host_binomials.size());
+    if (cudaMemcpyAsync(device_sums.data(), sums.low.data(), sums.low.size() * sizeof(arithmetic_t),
+                        cudaMemcpyHostToDevice, nullptr) != cudaSuccess ||
+        cudaMemcpyAsync(device_sums.data() + sums.low.size(), sums.high.data(), sums.high.size() * sizeof(arithmetic_t),
+                        cudaMemcpyHostToDevice, nullptr) != cudaSuccess ||
+        cudaMemcpyAsync(binomials.data(), host_binomials.data(), host_binomials.size() * sizeof(binomial_count_t),
+                        cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
+        throw std::runtime_error("Failed to copy the Kemeny inputs to the device");
 
-    std::copy(sums.low.begin(), sums.low.end(), device_sums.data());
-    std::copy(sums.high.begin(), sums.high.end(), device_sums.data() + sums.low.size());
-    std::copy(host_binomials.begin(), host_binomials.end(), binomials.data());
-
-    kemeny_device_sums<arithmetic_t> const device_view {
-        strided_view<arithmetic_t const, candidate_index_t>(device_sums.data(), num_candidates, sums.low_states,
-                                                            sums.low_states),
-        strided_view<arithmetic_t const, candidate_index_t>(device_sums.data() + sums.low.size(), num_candidates,
-                                                            sums.high_states, sums.high_states),
-        sums.low_bits,
-    };
+    kemeny_device_sums<arithmetic_t> const device_view = kemeny_device_view_(device_sums.data(), sums);
     auto const binomial_view = square_view<binomial_count_t const, candidate_index_t>(
         binomials.data(), binomials_stride, binomials_stride);
 
-    // Zeroes the empty subset the first layer reads, and faults the table's pages onto the device.
-    if (cudaMemset(costs.data(), 0, states * sizeof(arithmetic_t)) != cudaSuccess)
+    // Every layer writes all of its subsets, so the empty subset the first layer reads is the only one to clear.
+    if (cudaMemsetAsync(costs.data(), 0, sizeof(arithmetic_t), nullptr) != cudaSuccess)
         throw std::runtime_error("Failed to clear device memory");
 
     int minimum_grid = 0;
@@ -431,11 +485,57 @@ inline managed_vector<arithmetic_type_> compute_kemeny_costs_gpu(
         cudaError_t const error = cudaGetLastError();
         if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     }
+    return {std::move(costs), std::move(device_sums)};
+}
 
-    if (cudaDeviceSynchronize() != cudaSuccess)
-        throw std::runtime_error("CUDA operations did not complete successfully");
+/** Fills the exact Kemeny-Young subset cost table on the device and copies all of it back. */
+template <tally_arithmetic arithmetic_type_, typename stored_count_type_>
+inline std::vector<arithmetic_type_> compute_kemeny_costs_gpu(
+    strided_matrix<stored_count_type_ const, candidate_index_t> preferences,
+    kemeny_sums<arithmetic_type_> const& sums) {
+    using arithmetic_t = arithmetic_type_;
+    device_vector<arithmetic_t> const costs = kemeny_fill_gpu_<arithmetic_t>(preferences, sums).first;
+    std::vector<arithmetic_t> host_costs(costs.size());
+    cudaError_t const copied = cudaMemcpy(host_costs.data(), costs.data(), costs.size() * sizeof(arithmetic_t),
+                                          cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::format("CUDA Kemeny fill did not complete: {}", cudaGetErrorString(copied)));
+    return host_costs;
+}
 
-    return costs;
+/** Fills and walks the cost table on the device, so only the `2n + 2` words of its trace come back. */
+template <tally_arithmetic arithmetic_type_, typename stored_count_type_>
+inline kemeny_solution_t compute_kemeny_ranking_gpu(
+    strided_matrix<stored_count_type_ const, candidate_index_t> preferences,
+    kemeny_sums<arithmetic_type_> const& sums) {
+    using arithmetic_t = arithmetic_type_;
+    candidate_index_t const num_candidates = preferences.rows;
+    std::size_t const words = 2 * std::size_t(num_candidates) + 2;
+    auto const [costs, device_sums] = kemeny_fill_gpu_<arithmetic_t>(preferences, sums);
+    device_vector<std::uint64_t> device_trace(words);
+    kemeny_trace_cuda_<<<1, 1>>>(kemeny_device_view_(device_sums.data(), sums), costs.data(), num_candidates,
+                                 device_trace.data());
+    cudaError_t const error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+    std::vector<std::uint64_t> trace(words);
+    cudaError_t const copied = cudaMemcpy(trace.data(), device_trace.data(), words * sizeof(std::uint64_t),
+                                          cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::format("CUDA Kemeny search did not complete: {}", cudaGetErrorString(copied)));
+
+    if (trace[num_candidates] == static_cast<std::uint64_t>(std::numeric_limits<arithmetic_t>::max()))
+        throw std::overflow_error("Kemeny optimum reaches the overflow sentinel");
+    kemeny_solution_t solution;
+    solution.score = trace[num_candidates];
+    solution.multiplicity = static_cast<ranking_multiplicity_t>(trace[num_candidates + 1]);
+    for (candidate_index_t place = 0; place < num_candidates; place++) {
+        if (trace[place] >= num_candidates)
+            throw std::runtime_error("The Kemeny cost table disagrees with its own sums");
+        solution.ranking.push_back(static_cast<candidate_index_t>(trace[place]));
+    }
+    for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++)
+        if (trace[num_candidates + 2 + candidate]) solution.winners.push_back(candidate);
+    return solution;
 }
 
 #else
@@ -443,6 +543,12 @@ inline managed_vector<arithmetic_type_> compute_kemeny_costs_gpu(
 template <tally_arithmetic arithmetic_type_, typename stored_count_type_>
 inline std::vector<arithmetic_type_> compute_kemeny_costs_gpu(
     strided_matrix<stored_count_type_ const, candidate_index_t>, kemeny_sums<arithmetic_type_> const&) {
+    throw std::runtime_error("This build has no GPU support compiled in");
+}
+
+template <tally_arithmetic arithmetic_type_, typename stored_count_type_>
+inline kemeny_solution_t compute_kemeny_ranking_gpu(strided_matrix<stored_count_type_ const, candidate_index_t>,
+                                                    kemeny_sums<arithmetic_type_> const&) {
     throw std::runtime_error("This build has no GPU support compiled in");
 }
 
@@ -461,10 +567,7 @@ inline kemeny_solution_t compute_kemeny_ranking(strided_matrix<stored_count_type
         std::vector<arithmetic_t> const costs = compute_kemeny_costs_cpu<arithmetic_t>(preferences, sums, cancelled);
         return kemeny_trace_(sums, {costs.data(), costs.size()}, preferences);
     }
-    case backend_t::gpu_k: {
-        auto const costs = compute_kemeny_costs_gpu<arithmetic_t>(preferences, sums);
-        return kemeny_trace_(sums, {costs.data(), costs.size()}, preferences);
-    }
+    case backend_t::gpu_k: return compute_kemeny_ranking_gpu<arithmetic_t>(preferences, sums);
     }
     throw std::invalid_argument("backend must be cpu or gpu");
 }
