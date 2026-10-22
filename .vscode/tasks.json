@@ -12,7 +12,7 @@
     {
       "label": "Build the Mojo artifacts",
       "type": "shell",
-      "command": "pixi run build && pixi run build-cli",
+      "command": "pixi run build",
       "group": "build",
       "problemMatcher": [],
       "detail": "Writes build/scalingelections_mojo.so and build/scalingelections"

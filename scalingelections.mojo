@@ -9,6 +9,8 @@ checked integer conversion before entering the solvers.
 """
 
 from std.collections import Span, StringDict
+from std.ffi import _get_global
+from std.memory import Layout, alloc
 from std.os import abort
 from std.python import Python, PythonObject
 from std.python.bindings import ExceptionType, PythonModuleBuilder, raise_python_exception
@@ -32,6 +34,33 @@ def available_backends() raises -> PythonObject:
     if has_accelerator():
         names.append("gpu")
     return names
+
+
+def open_device() -> Optional[Pointer[NoneType, MutUntrackedOrigin]]:
+    """Opens the context behind `process_device`, or nothing when the runtime refuses one."""
+    try:
+        var device = DeviceContext() if has_accelerator() else DeviceContext(api="cpu")
+        var slot = alloc(Layout[DeviceContext](count=1)).unsafe_leak()
+        slot.unsafe_write(device^)
+        return slot.unsafe_bitcast[NoneType]()
+    except:
+        return None
+
+
+def close_device(device: Optional[Pointer[NoneType, MutUntrackedOrigin]]):
+    """Releases the context `open_device` opened, when the process exits."""
+    if device:
+        var slot = device.value().unsafe_bitcast[DeviceContext]()
+        _ = slot.unsafe_take_pointee()
+        slot.unsafe_free()
+
+
+def process_device() raises -> DeviceContext:
+    """The one context every call in this process shares, so no call pays to open a device or load its kernels."""
+    var device = _get_global["scalingelections_mojo.device", open_device, close_device]()
+    if not device:
+        raise Error("The Mojo runtime could not open a device")
+    return device.value().unsafe_bitcast[DeviceContext]()[]
 
 
 def score_type_from(mut kwargs: StringDict[PythonObject]) raises -> ScoreType:
@@ -123,6 +152,7 @@ def solve[
     var backend = Backend.gpu if backend_name == "gpu" else Backend.cpu
     if backend == Backend.gpu and not has_accelerator():
         return python_error("No GPU is available to the Mojo runtime", ExceptionType("PyExc_RuntimeError"))
+    var ctx = process_device()
     var np = Python.import_module("numpy")
     var builtins = Python.import_module("builtins")
     var array = np.asarray(preferences) if Bool(builtins.isinstance(preferences, np.ndarray)) else np.asarray(
@@ -144,15 +174,19 @@ def solve[
     if failure is not PythonObject(None):
         return failure
     if Bool(array.dtype == np.uint64):
-        return solve_matrix[Operation, DType.uint64](np.ascontiguousarray(array, dtype="uint64"), backend, score_type)
+        return solve_matrix[Operation, DType.uint64](
+            ctx, np.ascontiguousarray(array, dtype="uint64"), backend, score_type
+        )
     if Bool(array.max() <= PythonObject(UInt32.MAX)):
-        return solve_matrix[Operation, DType.uint32](np.ascontiguousarray(array, dtype="uint32"), backend, score_type)
-    return solve_matrix[Operation, DType.uint64](np.ascontiguousarray(array, dtype="uint64"), backend, score_type)
+        return solve_matrix[Operation, DType.uint32](
+            ctx, np.ascontiguousarray(array, dtype="uint32"), backend, score_type
+        )
+    return solve_matrix[Operation, DType.uint64](ctx, np.ascontiguousarray(array, dtype="uint64"), backend, score_type)
 
 
 def solve_matrix[
     Operation: SolverOperation, StoredCountDataType: DType
-](array: PythonObject, backend: Backend, var score_type: ScoreType) raises -> PythonObject:
+](ctx: DeviceContext, array: PythonObject, backend: Backend, var score_type: ScoreType) raises -> PythonObject:
     var view = from_numpy_tensor[StoredCountDataType, 2](array)
     var matrix = VoteMatrixView[StoredCountDataType, origin_of(array)](
         Span[SIMD[StoredCountDataType, 1], origin_of(array)](
@@ -171,7 +205,7 @@ def solve_matrix[
         return python_error(String(error), ExceptionType("PyExc_OverflowError"))
 
     def solve_with[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> PythonObject:
-        return solve_typed[Operation, ArithmeticDataType, ArithmeticMode](matrix, backend)
+        return solve_typed[Operation, ArithmeticDataType, ArithmeticMode](ctx, matrix, backend)
 
     return with_score_type(score_type, solve_with)
 
@@ -182,26 +216,26 @@ def solve_typed[
     Operation: SolverOperation,
     ArithmeticDataType: DType,
     ArithmeticMode: Arithmetic,
-](matrix: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> PythonObject:
+](ctx: DeviceContext, matrix: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> PythonObject:
     comptime if Operation == SolverOperation.strongest_paths:
         var paths = numpy_array[ArithmeticDataType](Python().tuple(matrix.num_candidates, matrix.num_candidates))
         schulze.strongest_paths_typed[ArithmeticDataType, schulze.SeedGraph.winning_votes](
-            matrix, backend, numpy_data[ArithmeticDataType](paths)
+            ctx, matrix, backend, numpy_data[ArithmeticDataType](paths)
         )
         return paths
     elif Operation == SolverOperation.split_cycle_winners:
-        var undefeated = schulze.split_cycle_winners_typed[ArithmeticDataType](matrix, backend)
+        var undefeated = schulze.split_cycle_winners_typed[ArithmeticDataType](ctx, matrix, backend)
         var winners = Python().list()
         for candidate in undefeated:
             winners.append(PythonObject(candidate))
         return winners
     elif Operation == SolverOperation.kemeny_costs:
-        return kemeny_costs_to_python[ArithmeticDataType, ArithmeticMode](matrix, backend)
+        return kemeny_costs_to_python[ArithmeticDataType, ArithmeticMode](ctx, matrix, backend)
     else:
         var trace: List[kemeny.KemenyTraceWord]
         try:
             trace = kemeny.compute_kemeny_trace_gpu[ArithmeticDataType, ArithmeticMode](
-                matrix
+                ctx, matrix
             ) if backend == Backend.gpu else kemeny.compute_kemeny_trace_cpu[ArithmeticDataType, ArithmeticMode](matrix)
         except error:
             return python_error(String(error), ExceptionType("PyExc_RuntimeError"))
@@ -225,13 +259,12 @@ def solve_typed[
 
 def kemeny_costs_to_python[
     StoredCountDataType: DType, //, ArithmeticDataType: DType, ArithmeticMode: Arithmetic
-](matrix: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> PythonObject:
+](ctx: DeviceContext, matrix: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> PythonObject:
     var states = 1 << matrix.num_candidates
     var sums = kemeny.KemenySums[ArithmeticDataType, ArithmeticMode](matrix)
     var costs = numpy_array[ArithmeticDataType](PythonObject(states))
     var costs_ptr = numpy_data[ArithmeticDataType](costs)
     if backend == Backend.gpu:
-        var ctx = DeviceContext()
         var (device_costs, _) = kemeny.compute_kemeny_costs_gpu(ctx, sums)
         ctx.enqueue_copy(dst_ptr=costs_ptr, src_buf=device_costs)
         ctx.synchronize()
@@ -295,6 +328,7 @@ def tally_prepared[
     var backend = Backend.gpu if backend_name == "gpu" else Backend.cpu
     if backend == Backend.gpu and not has_accelerator():
         return python_error("No GPU is available to the Mojo runtime", ExceptionType("PyExc_RuntimeError"))
+    var ctx = process_device()
     var np = Python.import_module("numpy")
     var builtins = Python.import_module("builtins")
     var integer_types = Python().tuple(builtins.int, np.integer)
@@ -405,14 +439,14 @@ def tally_prepared[
             and len(prepared.weights) == 0
             and (
                 backend == Backend.cpu
-                or ballots.tally_dense_serves_gpu[ArithmeticDataType, ArithmeticMode](DeviceContext(), num_candidates)
+                or ballots.tally_dense_serves_gpu[ArithmeticDataType, ArithmeticMode](ctx, num_candidates)
             )
         ):
             ballots.tally_ballots[ArithmeticDataType, ArithmeticMode](
-                flat, len(offsets) - 1, num_candidates, counts_ptr, backend=backend
+                ctx, flat, len(offsets) - 1, num_candidates, counts_ptr, backend=backend
             )
         else:
-            ballots.tally_ragged_typed[ArithmeticDataType, ArithmeticMode, Relation](prepared, backend, counts_ptr)
+            ballots.tally_ragged_typed[ArithmeticDataType, ArithmeticMode, Relation](ctx, prepared, backend, counts_ptr)
         comptime if ArithmeticMode == Arithmetic.saturated:
             for cell in range(num_candidates * num_candidates * planes):
                 if counts_ptr[unsafe_offset=cell] == SIMD[ArithmeticDataType, 1].MAX:
