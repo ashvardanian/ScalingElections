@@ -354,7 +354,7 @@ __global__ void kemeny_layer_cuda_(                                      //
     candidate_index_t const num_candidates = binomials.rows - 1;
     subset_mask_t const subset = kemeny_unrank_colex_(binomials, seated, rank);
 
-    arithmetic_t best = std::numeric_limits<arithmetic_t>::max();
+    arithmetic_t best = largest_count<arithmetic_t>();
     for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
         subset_mask_t const bit = subset_mask_t {1} << candidate;
         if (!(subset & bit)) continue;

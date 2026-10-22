@@ -22,7 +22,7 @@
 #include <string>      // `std::string`
 #include <string_view> // `std::string_view`
 #include <thread>      // `std::thread::hardware_concurrency()`
-#include <type_traits> // `std::integral_constant`, `std::is_same`, `std::type_identity_t`
+#include <type_traits> // `std::integral_constant`, `std::is_integral_v`, `std::is_same`, `std::type_identity_t`
 #include <vector>      // `std::vector`
 
 #if defined(_OPENMP)
@@ -158,7 +158,7 @@ struct saturated {
     SCALING_ELECTIONS_HOST_DEVICE constexpr saturated(count_t count) noexcept : value(count) {}
     SCALING_ELECTIONS_HOST_DEVICE constexpr explicit operator count_t() const noexcept { return value; }
     SCALING_ELECTIONS_HOST_DEVICE constexpr saturated operator+(saturated other) const noexcept {
-        count_t const limit = std::numeric_limits<count_t>::max();
+        count_t const limit = static_cast<count_t>(~count_t {0});
         return value > limit - other.value ? limit : value + other.value;
     }
     SCALING_ELECTIONS_HOST_DEVICE constexpr saturated& operator+=(saturated other) noexcept {
@@ -187,7 +187,7 @@ struct saturated {
 template <typename count_type_>
 struct std::numeric_limits<saturated<count_type_>> : std::numeric_limits<count_type_> {
     SCALING_ELECTIONS_HOST_DEVICE static constexpr saturated<count_type_> max() noexcept {
-        return std::numeric_limits<count_type_>::max();
+        return static_cast<count_type_>(~count_type_ {0});
     }
 };
 
@@ -197,6 +197,13 @@ concept tally_arithmetic = std::numeric_limits<scalar_type_>::is_integer &&
                            !std::numeric_limits<scalar_type_>::is_signed &&
                            (std::numeric_limits<scalar_type_>::digits > 1) &&
                            (std::numeric_limits<scalar_type_>::digits <= 64);
+
+/** The largest value of a tally arithmetic, for host and device code alike. */
+template <tally_arithmetic arithmetic_type_>
+SCALING_ELECTIONS_HOST_DEVICE constexpr arithmetic_type_ largest_count() noexcept {
+    if constexpr (std::is_integral_v<arithmetic_type_>) return static_cast<arithmetic_type_>(~arithmetic_type_ {0});
+    else return std::numeric_limits<arithmetic_type_>::max();
+}
 
 inline std::size_t checked_product(std::size_t count, std::size_t width) {
     if (width && count > std::numeric_limits<std::size_t>::max() / width)
