@@ -348,34 +348,53 @@ __forceinline__ __device__ arithmetic_type_ kemeny_relax_(arithmetic_type_ rest,
     return score < best ? score : best;
 }
 
+/** Low bits covered by one block, with one thread per low-mask state. */
+constexpr candidate_index_t kemeny_group_bits_k = 8;
+
 /**
- *  @brief Fills every subset that seats @p seated candidates, one thread to a subset.
+ *  @brief Fills a contiguous group of subsets sharing the same high bits.
  *
- *  Threads take colex ranks that @p binomials unranks into a mask, so a layer costs exactly as
- *  many threads as it has subsets. Clearing a bit drops the population count by one, and that
- *  layer is complete before this one launches.
+ *  Clearing a high bit reaches a completed group in the preceding high-population layer.
+ *  Clearing a low bit stays in shared memory, where barriers order the low-population layers.
+ *  Every thread reaches every barrier, including threads outside a small field's low mask.
  */
 template <tally_arithmetic arithmetic_type_>
-__global__ void kemeny_layer_cuda_(                                      //
-    kemeny_device_sums<arithmetic_type_> sums, arithmetic_type_* costs,  //
-    strided_matrix<binomial_count_t const, candidate_index_t> binomials, //
-    candidate_index_t seated, binomial_count_t layer_states) {
+__global__ void kemeny_group_cuda_(kemeny_device_sums<arithmetic_type_> sums, arithmetic_type_* costs,
+                                   strided_matrix<binomial_count_t const, candidate_index_t> high_binomials,
+                                   candidate_index_t high_seated, candidate_index_t low_bits) {
     using arithmetic_t = arithmetic_type_;
+    __shared__ arithmetic_t local[1u << kemeny_group_bits_k];
+    __shared__ subset_mask_t prefix;
+    if (threadIdx.x == 0) prefix = kemeny_unrank_colex_(high_binomials, high_seated, blockIdx.x) << low_bits;
+    __syncthreads();
 
-    // The widest layer fits the rank type with room to spare, so rounding up to whole blocks cannot wrap.
-    binomial_count_t const rank = blockIdx.x * blockDim.x + threadIdx.x;
-    if (rank >= layer_states) return;
-    candidate_index_t const num_candidates = binomials.rows - 1;
-    subset_mask_t const subset = kemeny_unrank_colex_(binomials, seated, rank);
-
-    arithmetic_t best = std::numeric_limits<arithmetic_t>::max();
-    for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
-        subset_mask_t const bit = subset_mask_t {1} << candidate;
-        if (!(subset & bit)) continue;
-        subset_mask_t const rest = subset ^ bit;
-        best = kemeny_relax_(costs[rest], sums.against(candidate, rest), best);
+    unsigned const low = threadIdx.x;
+    bool const active = low < (1u << low_bits);
+    if (active) {
+        arithmetic_t best = prefix == 0 && low == 0 ? arithmetic_t {0} : largest_count<arithmetic_t>();
+        for (subset_mask_t members = prefix; members; members &= members - 1) {
+            candidate_index_t const candidate = static_cast<candidate_index_t>(
+                __ffsll(static_cast<long long>(members)) - 1);
+            subset_mask_t const rest = (prefix ^ (subset_mask_t {1} << candidate)) | low;
+            best = kemeny_relax_(costs[rest], sums.against(candidate, rest), best);
+        }
+        local[low] = best;
     }
-    costs[subset] = best;
+    __syncthreads();
+
+    for (candidate_index_t seated = 1; seated <= low_bits; seated++) {
+        if (active && __popc(low) == seated) {
+            arithmetic_t best = local[low];
+            for (unsigned members = low; members; members &= members - 1) {
+                candidate_index_t const candidate = static_cast<candidate_index_t>(__ffs(members) - 1);
+                unsigned const rest_low = low ^ (1u << candidate);
+                best = kemeny_relax_(local[rest_low], sums.against(candidate, prefix | rest_low), best);
+            }
+            local[low] = best;
+        }
+        __syncthreads();
+    }
+    if (active) costs[prefix | low] = local[low];
 }
 
 /**
@@ -392,7 +411,7 @@ __global__ void kemeny_trace_cuda_(kemeny_device_sums<arithmetic_type_> sums, ar
     subset_mask_t const everyone = (subset_mask_t {1} << num_candidates) - 1;
     arithmetic_t const optimum = costs[everyone];
     trace[num_candidates] = static_cast<std::uint64_t>(optimum);
-    if (optimum == std::numeric_limits<arithmetic_t>::max()) return;
+    if (optimum == largest_count<arithmetic_t>()) return;
 
     trace[num_candidates + 1] = static_cast<std::uint64_t>(ranking_multiplicity_t::unique_k);
     for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
@@ -423,9 +442,9 @@ __global__ void kemeny_trace_cuda_(kemeny_device_sums<arithmetic_type_> sums, ar
 /**
  *  @brief Fills the exact Kemeny-Young subset cost table on a CUDA or @b HIP device.
  *
- *  One launch per population count, because subsets of one width depend only on the width below
- *  and never on each other. The answer is the host's, entry for entry: the same integer sums
- *  reach the same minimum whatever order the threads take them in.
+ *  Each block solves the contiguous low-mask states under one high mask in shared memory, and the
+ *  launches go by high-mask population. The table matches the host's entry for entry: the same
+ *  integer sums reach the same minimum whatever order the threads take them in.
  *
  *  @param[in] preferences The pairwise preference matrix.
  *  @param[in] sums The split subset sums built from the same matrix.
@@ -466,22 +485,14 @@ inline std::pair<device_vector<arithmetic_type_>, device_vector<arithmetic_type_
         throw std::runtime_error("Failed to copy the Kemeny inputs to the device");
 
     kemeny_device_sums<arithmetic_t> const device_view = kemeny_device_view_(device_sums.data(), sums);
-    auto const binomial_view = square_view<binomial_count_t const, candidate_index_t>(
-        binomials.data(), binomials_stride, binomials_stride);
-
-    // Every layer writes all of its subsets, so the empty subset the first layer reads is the only one to clear.
-    if (cudaMemsetAsync(costs.data(), 0, sizeof(arithmetic_t), nullptr) != cudaSuccess)
-        throw std::runtime_error("Failed to clear device memory");
-
-    int minimum_grid = 0;
-    int block_size = 0;
-    if (cudaOccupancyMaxPotentialBlockSize(&minimum_grid, &block_size, kemeny_layer_cuda_<arithmetic_t>) != cudaSuccess)
-        throw std::runtime_error("Failed to size the Kemeny layer kernel");
-    for (candidate_index_t seated = 1; seated <= num_candidates; seated++) {
-        binomial_count_t const layer_states = host_binomials[num_candidates * binomials_stride + seated];
-        binomial_count_t const blocks = divide_round_up(layer_states, static_cast<binomial_count_t>(block_size));
-        kemeny_layer_cuda_<<<blocks, block_size>>>(device_view, costs.data(), binomial_view, seated, layer_states);
-
+    candidate_index_t const low_bits = std::min(num_candidates, kemeny_group_bits_k);
+    candidate_index_t const high_bits = num_candidates - low_bits;
+    auto const high_binomial_view = strided_view<binomial_count_t const, candidate_index_t>(
+        binomials.data(), high_bits + 1, high_bits + 1, binomials_stride);
+    for (candidate_index_t seated = 0; seated <= high_bits; seated++) {
+        binomial_count_t const blocks = host_binomials[high_bits * binomials_stride + seated];
+        kemeny_group_cuda_<<<blocks, 1u << kemeny_group_bits_k>>>(device_view, costs.data(), high_binomial_view, seated,
+                                                                  low_bits);
         cudaError_t const error = cudaGetLastError();
         if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
     }
