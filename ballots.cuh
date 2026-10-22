@@ -75,7 +75,7 @@ __global__ void tally_ballots_cuda_(ballots_t rankings, strided_matrix<arithmeti
     candidate_index_t const num_candidates = preferences.rows;
     std::size_t const cells = static_cast<std::size_t>(num_candidates) * num_candidates;
 
-    extern __shared__ alignas(16) std::byte tally_shared_[];
+    alignas(16) extern __shared__ std::byte tally_shared_[];
     arithmetic_t* const counters = reinterpret_cast<arithmetic_t*>(tally_shared_);
     for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x) counters[cell] = arithmetic_t {0};
     __syncthreads();
@@ -150,18 +150,23 @@ inline void tally_ballots_gpu(ballots_t rankings, strided_matrix<arithmetic_type
     if (!device_can_read_(rankings.data)) {
         // A driver copy lands the chunk on the device outright, where a host loop would leave the
         // kernel to fault every page in one at a time.
-        managed_vector<candidate_index_t> staging((num_ballots - 1) * ballot_stride + num_candidates);
-        if (cudaMemcpy(staging.data(), rankings.data, staging.size() * sizeof(candidate_index_t),
-                       cudaMemcpyHostToDevice) != cudaSuccess)
+        device_vector<candidate_index_t> staging((num_ballots - 1) * ballot_stride + num_candidates);
+        if (cudaMemcpyAsync(staging.data(), rankings.data, staging.size() * sizeof(candidate_index_t),
+                            cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
             throw std::runtime_error("Failed to copy ballots to the device");
         return tally_ballots_gpu(strided_view<candidate_index_t const, std::size_t>(staging.data(), num_ballots,
                                                                                     num_candidates, ballot_stride),
                                  preferences);
     }
 
+    // The kernel only adds into the counts, so they start from the matrix it accumulates into.
     std::size_t const cells = static_cast<std::size_t>(num_candidates) * num_candidates;
-    managed_vector<arithmetic_t> device_counts(cells);
-    std::fill(device_counts.begin(), device_counts.end(), arithmetic_t {0});
+    std::size_t const row_bytes = num_candidates * sizeof(arithmetic_t);
+    std::size_t const preferences_pitch = preferences.stride * sizeof(arithmetic_t);
+    device_vector<arithmetic_t> device_counts(cells);
+    if (cudaMemcpy2DAsync(device_counts.data(), row_bytes, preferences.data, preferences_pitch, row_bytes,
+                          num_candidates, cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
+        throw std::runtime_error("Failed to copy the tally to the device");
 
     // The shared footprint grows with the warps per block, so the block size is chosen against it.
     int const warp_size = current_device_properties_().warpSize;
@@ -182,12 +187,10 @@ inline void tally_ballots_gpu(ballots_t rankings, strided_matrix<arithmetic_type
 
     cudaError_t const error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
-    if (cudaDeviceSynchronize() != cudaSuccess)
-        throw std::runtime_error("CUDA operations did not complete successfully");
-
-    for (candidate_index_t row = 0; row < num_candidates; row++)
-        for (candidate_index_t column = 0; column < num_candidates; column++)
-            preferences(row, column) += device_counts.data()[std::size_t(row) * num_candidates + column];
+    cudaError_t const copied = cudaMemcpy2D(preferences.data, preferences_pitch, device_counts.data(), row_bytes,
+                                            row_bytes, num_candidates, cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::format("CUDA tally did not complete: {}", cudaGetErrorString(copied)));
 }
 
 #else
@@ -456,24 +459,26 @@ inline void tally_ballots_gpu(ragged_ballots ballots, strided_matrix<arithmetic_
     using arithmetic_t = arithmetic_type_;
     if (!ballots.num_ballots) return;
     std::size_t const entries = ballots.offsets[ballots.num_ballots];
-    std::size_t const cells = checked_product(checked_product(ballots.num_candidates, ballots.num_candidates),
-                                              relation_planes_(relation));
+    std::size_t const rows = checked_product(ballots.num_candidates, relation_planes_(relation));
+    std::size_t const cells = checked_product(rows, ballots.num_candidates);
+    std::size_t const row_bytes = checked_product(ballots.num_candidates, sizeof(arithmetic_t));
+    std::size_t const preferences_pitch = checked_product(preferences.stride, sizeof(arithmetic_t));
     std::size_t const shared_bytes = relation == pairwise_relation_t::preference_k &&
                                              (ballots.policies || ballots.unranked == unranked_t::worse_k)
                                          ? divide_round_up(std::size_t(ballots.num_candidates), 32) * 4
                                          : 0;
     if (shared_bytes > static_cast<std::size_t>(current_device_properties_().sharedMemPerBlock))
         throw std::invalid_argument("Ballot presence bitmap exceeds device shared memory");
-    managed_vector<candidate_index_t> candidates(entries);
-    managed_vector<rank_label_t> ranks(ballots.ranks ? entries : 0);
-    managed_vector<ballot_offset_t> offsets(ballots.num_ballots + 1);
-    managed_vector<voter_weight_t> weights(ballots.weights ? ballots.num_ballots : 0);
-    managed_vector<unranked_t> policies(ballots.policies ? ballots.num_ballots : 0);
-    managed_vector<arithmetic_t> counts(cells);
+    device_vector<candidate_index_t> candidates(entries);
+    device_vector<rank_label_t> ranks(ballots.ranks ? entries : 0);
+    device_vector<ballot_offset_t> offsets(ballots.num_ballots + 1);
+    device_vector<voter_weight_t> weights(ballots.weights ? ballots.num_ballots : 0);
+    device_vector<unranked_t> policies(ballots.policies ? ballots.num_ballots : 0);
+    device_vector<arithmetic_t> counts(cells);
     auto copy = [](auto& destination, auto const* source) {
         if (!destination.empty() &&
-            cudaMemcpy(destination.data(), source, checked_product(destination.size(), sizeof(*source)),
-                       cudaMemcpyHostToDevice) != cudaSuccess)
+            cudaMemcpyAsync(destination.data(), source, checked_product(destination.size(), sizeof(*source)),
+                            cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
             throw std::runtime_error("Failed to copy ballots to device");
     };
     copy(candidates, ballots.candidates);
@@ -481,8 +486,10 @@ inline void tally_ballots_gpu(ragged_ballots ballots, strided_matrix<arithmetic_
     copy(ranks, ballots.ranks);
     copy(weights, ballots.weights);
     copy(policies, ballots.policies);
-    if (cudaMemset(counts.data(), 0, checked_product(cells, sizeof(arithmetic_t))) != cudaSuccess)
-        throw std::runtime_error("Failed to clear device memory");
+    // The kernel only adds into the counts, so they start from the matrix it accumulates into.
+    if (cudaMemcpy2DAsync(counts.data(), row_bytes, preferences.data, preferences_pitch, row_bytes, rows,
+                          cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
+        throw std::runtime_error("Failed to copy the tally to the device");
     ragged_ballots const device_ballots {candidates.data(),
                                          offsets.data(),
                                          ballots.ranks ? ranks.data() : nullptr,
@@ -499,15 +506,16 @@ inline void tally_ballots_gpu(ragged_ballots ballots, strided_matrix<arithmetic_
         throw std::runtime_error("Failed to size the tally kernel");
     unsigned const blocks = static_cast<unsigned>(std::min<std::size_t>(
         ballots.num_ballots, resident_blocks_(tally_ragged_ballots_cuda_<arithmetic_t>, block_size, shared_bytes)));
-    managed_vector<rank_position_t> rank_scratch(
+    device_vector<rank_position_t> rank_scratch(
         relation == pairwise_relation_t::preference_k ? 0 : checked_product(blocks, ballots.num_candidates));
     tally_ragged_ballots_cuda_<<<blocks, block_size, shared_bytes>>>(device_ballots, counts.data(), relation,
                                                                      rank_scratch.data());
     cudaError_t const error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
-    if (cudaDeviceSynchronize() != cudaSuccess) throw std::runtime_error("CUDA tally did not complete");
-    for (std::size_t cell = 0; cell < cells; ++cell)
-        preferences(cell / ballots.num_candidates, cell % ballots.num_candidates) += counts[cell];
+    cudaError_t const copied = cudaMemcpy2D(preferences.data, preferences_pitch, counts.data(), row_bytes, row_bytes,
+                                            rows, cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::format("CUDA tally did not complete: {}", cudaGetErrorString(copied)));
 }
 
 #else

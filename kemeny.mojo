@@ -566,12 +566,11 @@ def compute_kemeny_costs_gpu[
 
 def compute_kemeny_trace_gpu[
     StoredCountDataType: DType, //, ArithmeticDataType: DType, ArithmeticMode: Arithmetic
-](preferences: VoteMatrixView[StoredCountDataType, _]) raises -> List[KemenyTraceWord]:
+](ctx: DeviceContext, preferences: VoteMatrixView[StoredCountDataType, _]) raises -> List[KemenyTraceWord]:
     """Fills the cost table on the GPU, one launch per population count, and traces it there."""
     require_kemeny_score_range[ArithmeticDataType, ArithmeticMode](preferences)
     var num_candidates = preferences.num_candidates
     var sums = KemenySums[ArithmeticDataType, ArithmeticMode](preferences)
-    var ctx = DeviceContext()
     var (costs, device_sums) = compute_kemeny_costs_gpu(ctx, sums)
     var device_trace = ctx.enqueue_create_buffer[KemenyTraceWord.dtype](2 * num_candidates + 2)
     ctx.enqueue_function[kemeny_trace_kernel[ArithmeticDataType, ArithmeticMode]](
@@ -590,10 +589,10 @@ def compute_kemeny_trace_gpu[
 
 def compute_kemeny_ranking_gpu[
     StoredCountDataType: DType, //, ArithmeticDataType: DType, ArithmeticMode: Arithmetic
-](preferences: VoteMatrixView[StoredCountDataType, _]) raises -> KemenySolution:
+](ctx: DeviceContext, preferences: VoteMatrixView[StoredCountDataType, _]) raises -> KemenySolution:
     """Solves exact consensus on the GPU, one launch per subset population count."""
     return kemeny_solution_from_trace[ArithmeticDataType](
-        compute_kemeny_trace_gpu[ArithmeticDataType, ArithmeticMode](preferences)
+        compute_kemeny_trace_gpu[ArithmeticDataType, ArithmeticMode](ctx, preferences)
     )
 
 
@@ -603,6 +602,7 @@ def compute_kemeny_ranking_gpu[
 def compute_kemeny_ranking[
     StoredCountDataType: DType
 ](
+    ctx: DeviceContext,
     preferences: VoteMatrixView[StoredCountDataType, _],
     *,
     backend: Backend,
@@ -612,7 +612,7 @@ def compute_kemeny_ranking[
 
     def solve[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> KemenySolution:
         if backend == Backend.gpu:
-            return compute_kemeny_ranking_gpu[ArithmeticDataType, ArithmeticMode](preferences)
+            return compute_kemeny_ranking_gpu[ArithmeticDataType, ArithmeticMode](ctx, preferences)
         return compute_kemeny_ranking_cpu[ArithmeticDataType, ArithmeticMode](preferences)
 
     return with_score_type(resolve_score_type(preferences, score_type), solve)

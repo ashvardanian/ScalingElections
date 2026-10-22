@@ -31,8 +31,8 @@ abstract: >-
   bounds it to small fields, which is the honest price of exactness and the reason both machines
   share one repository: the cubic methods run to tens of thousands of candidates, the exponential one
   cannot, and the boundary between them is the interesting part. Kernels cover NVIDIA GPUs through
-  CUDA C++, AMD GPUs through ROCm/HIP, and CPUs through OpenMP and Arm NEON, alongside a single-file
-  Mojo implementation spanning CPU, SIMD, and GPU paths, all validated against serial NumPy and Numba
+  CUDA C++, AMD GPUs through ROCm/HIP, and CPUs through OpenMP and Arm NEON, alongside a Mojo
+  implementation spanning CPU, SIMD, and GPU paths, all validated against serial NumPy and Numba
   references.
 keywords:
   - social-choice

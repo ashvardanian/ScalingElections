@@ -765,7 +765,7 @@ void sweep_graph_(strided_matrix<arithmetic_type_> graph) {
  *  @param[in] preferences The preferences matrix.
  *  @param[out] paths The matrix of strongest paths, one cell per candidate pair.
  *
- *  The sweep runs on a managed copy padded to a whole number of tiles, so the kernels need no tail
+ *  The sweep runs on a device copy padded to a whole number of tiles, so the kernels need no tail
  *  checks: the padding is zero, which is the identity of the max-min semiring.
  */
 template <std::uint32_t tile_size_, seed_graph_t seed_, tally_arithmetic arithmetic_type_, typename stored_count_type_,
@@ -776,25 +776,42 @@ void compute_strongest_paths_gpu(strided_matrix<stored_count_type_ const> prefer
     using output_count_t = output_count_type_;
     candidate_index_t const num_candidates = preferences.rows;
     candidate_index_t const stride = divide_round_up(num_candidates, tile_size_) * tile_size_;
-    managed_vector<arithmetic_t> graph(checked_product(stride, stride));
-    if (cudaMemset(graph.data(), 0, checked_product(graph.size(), sizeof(arithmetic_t))) != cudaSuccess ||
-        cudaDeviceSynchronize() != cudaSuccess)
-        throw std::runtime_error("Failed to clear device memory");
-
-    seed_graph_<seed_>(preferences, square_view(graph.data(), num_candidates, stride));
-    sweep_graph_<tile_size_>(square_view(graph.data(), stride, stride));
-    if (cudaDeviceSynchronize() != cudaSuccess) throw std::runtime_error("CUDA solver did not complete");
-
+    std::size_t const graph_pitch = std::size_t(stride) * sizeof(arithmetic_t);
+    std::size_t const row_bytes = std::size_t(num_candidates) * sizeof(arithmetic_t);
+    device_vector<arithmetic_t> graph(checked_product(stride, stride));
+    std::size_t const graph_bytes = checked_product(graph.size(), sizeof(arithmetic_t));
+    std::vector<arithmetic_t> host_graph;
     if constexpr (std::is_same_v<arithmetic_t, output_count_t>) {
-        if (cudaMemcpy2D(paths.data, paths.stride * sizeof(output_count_t), graph.data(),
-                         std::size_t(stride) * sizeof(arithmetic_t), std::size_t(num_candidates) * sizeof(arithmetic_t),
-                         num_candidates, cudaMemcpyDeviceToHost) != cudaSuccess)
-            throw std::runtime_error("Failed to copy paths from device");
+        // The output holds the seed until the sweep overwrites it, so only its leading block crosses over.
+        seed_graph_<seed_>(preferences, paths);
+        if (cudaMemsetAsync(graph.data(), 0, graph_bytes, nullptr) != cudaSuccess ||
+            cudaMemcpy2DAsync(graph.data(), graph_pitch, paths.data, paths.stride * sizeof(output_count_t), row_bytes,
+                              num_candidates, cudaMemcpyHostToDevice, nullptr) != cudaSuccess)
+            throw std::runtime_error("Failed to copy the graph to the device");
     }
     else {
-        // The managed pages fault back to the host, and each cell widens on its way out.
-        strided_matrix<arithmetic_t const> const swept = square_view<arithmetic_t const>(graph.data(), num_candidates,
-                                                                                         stride);
+        host_graph.resize(graph.size());
+        seed_graph_<seed_>(preferences, square_view(host_graph.data(), num_candidates, stride));
+        if (cudaMemcpyAsync(graph.data(), host_graph.data(), graph_bytes, cudaMemcpyHostToDevice, nullptr) !=
+            cudaSuccess)
+            throw std::runtime_error("Failed to copy the graph to the device");
+    }
+
+    sweep_graph_<tile_size_>(square_view(graph.data(), stride, stride));
+
+    if constexpr (std::is_same_v<arithmetic_t, output_count_t>) {
+        cudaError_t const copied = cudaMemcpy2D(paths.data, paths.stride * sizeof(output_count_t), graph.data(),
+                                                graph_pitch, row_bytes, num_candidates, cudaMemcpyDeviceToHost);
+        if (copied != cudaSuccess)
+            throw std::runtime_error(std::format("CUDA solver did not complete: {}", cudaGetErrorString(copied)));
+    }
+    else {
+        // The narrower graph lands in its host copy, and each cell widens on its way out.
+        cudaError_t const copied = cudaMemcpy(host_graph.data(), graph.data(), graph_bytes, cudaMemcpyDeviceToHost);
+        if (copied != cudaSuccess)
+            throw std::runtime_error(std::format("CUDA solver did not complete: {}", cudaGetErrorString(copied)));
+        strided_matrix<arithmetic_t const> const swept = square_view<arithmetic_t const>(host_graph.data(),
+                                                                                         num_candidates, stride);
         for (candidate_index_t row = 0; row < num_candidates; row++)
             std::copy_n(&swept(row, 0), num_candidates, &paths(row, 0));
     }

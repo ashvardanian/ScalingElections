@@ -426,6 +426,7 @@ def tally_dense_kernel(
 def tally_ballots_gpu[
     ArithmeticDataType: DType, ArithmeticMode: Arithmetic
 ](
+    ctx: DeviceContext,
     candidates: Span[CandidateIndex, ImmUntrackedOrigin],
     num_ballots: Int,
     num_candidates: Int,
@@ -435,12 +436,12 @@ def tally_ballots_gpu[
     Counts complete rankings into a pairwise matrix, one private matrix per block.
 
     Args:
+        ctx: The device the tally runs on.
         candidates: Row-major complete rankings, `num_ballots` by `num_candidates`, best first.
         num_ballots: Number of ballots in the chunk.
         num_candidates: The number of candidates, which `tally_dense_serves_gpu` must accept.
         preferences: Host matrix of `num_candidates` squared counts, overwritten.
     """
-    var ctx = DeviceContext()
     if not tally_dense_serves_gpu[ArithmeticDataType, ArithmeticMode](ctx, num_candidates):
         raise Error("The dense GPU tally cannot count this field in this arithmetic")
 
@@ -480,6 +481,7 @@ def tally_ballots_gpu[
 def tally_ballots[
     ArithmeticDataType: DType, ArithmeticMode: Arithmetic
 ](
+    ctx: DeviceContext,
     candidates: Span[CandidateIndex, ImmUntrackedOrigin],
     num_ballots: Int,
     num_candidates: Int,
@@ -490,7 +492,7 @@ def tally_ballots[
     """Counts complete rankings into `preferences` using the selected device's dense kernel."""
     if backend == Backend.gpu:
         return tally_ballots_gpu[ArithmeticDataType, ArithmeticMode](
-            candidates, num_ballots, num_candidates, preferences
+            ctx, candidates, num_ballots, num_candidates, preferences
         )
     tally_ballots_cpu[ArithmeticDataType, ArithmeticMode](candidates, num_ballots, num_candidates, preferences)
 
@@ -703,7 +705,12 @@ def tally_reduce_kernel[
 
 def tally_ragged_typed[
     ArithmeticDataType: DType, ArithmeticMode: Arithmetic, Relation: PairwiseRelation
-](ballots: RaggedBallots, backend: Backend, counts: Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin],) raises:
+](
+    ctx: DeviceContext,
+    ballots: RaggedBallots,
+    backend: Backend,
+    counts: Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin],
+) raises:
     """Overwrites `counts` with the relation's planes of `num_candidates` squared cells, without validating."""
     var num_candidates = ballots.num_candidates
     var cells = num_candidates * num_candidates * Relation.planes()
@@ -739,7 +746,6 @@ def tally_ragged_typed[
 
     # Private rows avoid unsupported 64-bit atomics on Metal. One chunk of ballots per resident row
     # of threads saturates the device; more chunks would only multiply the private planes.
-    var ctx = DeviceContext()
     var resident_threads = Int(ctx.get_attribute(DeviceAttribute.MULTIPROCESSOR_COUNT)) * Int(
         ctx.get_attribute(DeviceAttribute.MAX_THREADS_PER_BLOCK)
     )
@@ -872,6 +878,7 @@ def tally_ragged_relations[
     ArithmeticMode: Arithmetic,
     Relation: PairwiseRelation,
 ](
+    ctx: DeviceContext,
     ballots: RaggedBallots,
     counts: Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin],
     *,
@@ -882,7 +889,7 @@ def tally_ragged_relations[
     comptime if ArithmeticMode == Arithmetic.exact:
         if bound > VoterWeight(SIMD[ArithmeticDataType, 1].MAX) or bound == VoterWeight.MAX:
             raise Error("Tally bound exceeds the selected arithmetic type")
-    tally_ragged_typed[ArithmeticDataType, ArithmeticMode, Relation](ballots, backend, counts)
+    tally_ragged_typed[ArithmeticDataType, ArithmeticMode, Relation](ctx, ballots, backend, counts)
 
 
 # endregion Ragged Tally

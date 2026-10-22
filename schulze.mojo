@@ -286,6 +286,7 @@ def compute_strongest_paths_tiled_cpu[
     Closes the seeded graph into strongest paths across the CPU cores, one tile per task.
 
     Parameters:
+        ArithmeticDataType: The width the closure runs in.
         TileSize: The tile edge, which the vector width divides.
         SeedMode: Which graph the closure runs over, since Split Cycle wants margins.
 
@@ -531,6 +532,7 @@ def compute_strongest_paths_gpu[
     TileSize: Int,
     SeedMode: SeedGraph,
 ](
+    ctx: DeviceContext,
     preferences: VoteMatrixView[StoredCountDataType, _],
     paths: Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin],
 ) raises:
@@ -538,10 +540,12 @@ def compute_strongest_paths_gpu[
     Closes the seeded graph into strongest paths on the GPU, three kernels per pivot tile.
 
     Parameters:
+        ArithmeticDataType: The width the closure runs in.
         TileSize: The tile edge, which is also the block edge.
         SeedMode: Which graph the closure runs over, since Split Cycle wants margins.
 
     Args:
+        ctx: The device the closure runs on.
         preferences: Input preference matrix.
         paths: The dense `num_candidates` square output, overwritten.
     """
@@ -552,7 +556,6 @@ def compute_strongest_paths_gpu[
     var num_tiles = divide_round_up(num_candidates, TileSize)
     var padded = num_tiles * TileSize
 
-    var ctx = DeviceContext()
     var host_graph = ctx.enqueue_create_host_buffer[ArithmeticDataType](padded * padded)
     var device_graph = ctx.enqueue_create_buffer[ArithmeticDataType](padded * padded)
     ctx.synchronize()
@@ -632,19 +635,21 @@ def resolve_score_type[
 def strongest_paths_typed[
     StoredCountDataType: DType, //, ArithmeticDataType: DType, SeedMode: SeedGraph
 ](
+    ctx: DeviceContext,
     preferences: VoteMatrixView[StoredCountDataType, _],
     backend: Backend,
     paths: Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin],
 ) raises:
     """Computes paths into `paths` in the selected arithmetic width, on the selected device."""
     if backend == Backend.gpu:
-        return compute_strongest_paths_gpu[ArithmeticDataType, TILE_SIZE, SeedMode](preferences, paths)
+        return compute_strongest_paths_gpu[ArithmeticDataType, TILE_SIZE, SeedMode](ctx, preferences, paths)
     compute_strongest_paths_tiled_cpu[ArithmeticDataType, TILE_SIZE, SeedMode](preferences, paths)
 
 
 def compute_strongest_paths[
     StoredCountDataType: DType, //, SeedMode: SeedGraph
 ](
+    ctx: DeviceContext,
     preferences: VoteMatrixView[StoredCountDataType, _],
     *,
     backend: Backend = Backend.cpu,
@@ -658,11 +663,11 @@ def compute_strongest_paths[
     def solve[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> None:
         comptime if ArithmeticDataType == StoredCountDataType:
             return strongest_paths_typed[ArithmeticDataType, SeedMode](
-                preferences, backend, rebind[Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin]](stored)
+                ctx, preferences, backend, rebind[Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin]](stored)
             )
         else:
             var paths = VoteMatrix[ArithmeticDataType](num_candidates)
-            strongest_paths_typed[ArithmeticDataType, SeedMode](preferences, backend, paths.data)
+            strongest_paths_typed[ArithmeticDataType, SeedMode](ctx, preferences, backend, paths.data)
             for cell in range(num_candidates * num_candidates):
                 stored[unsafe_offset=cell] = paths.data[unsafe_offset=cell].cast[StoredCountDataType]()
 
@@ -679,6 +684,7 @@ def compute_strongest_paths[
 def compute_split_cycle_winners[
     StoredCountDataType: DType
 ](
+    ctx: DeviceContext,
     preferences: VoteMatrixView[StoredCountDataType, _],
     *,
     backend: Backend = Backend.cpu,
@@ -692,25 +698,28 @@ def compute_split_cycle_winners[
     so it can name several winners where Schulze names one.
 
     Args:
+        ctx: The device a GPU backend runs on.
         preferences: Pairwise vote counts.
+        backend: The device that closes the margin graph.
+        score_type: The arithmetic the margins close in.
 
     Returns:
         The undefeated candidates, in increasing order.
     """
 
     def select[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> List[Int]:
-        return split_cycle_winners_typed[ArithmeticDataType](preferences, backend)
+        return split_cycle_winners_typed[ArithmeticDataType](ctx, preferences, backend)
 
     return with_score_type(resolve_score_type[SeedGraph.positive_margins](preferences, score_type), select)
 
 
 def split_cycle_winners_typed[
     StoredCountDataType: DType, //, ArithmeticDataType: DType
-](preferences: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> List[Int]:
+](ctx: DeviceContext, preferences: VoteMatrixView[StoredCountDataType, _], backend: Backend) raises -> List[Int]:
     """Selects Split Cycle winners without converting the intermediate path matrix."""
     var num_candidates = preferences.num_candidates
     var margin_paths = VoteMatrix[ArithmeticDataType](num_candidates)
-    strongest_paths_typed[ArithmeticDataType, SeedGraph.positive_margins](preferences, backend, margin_paths.data)
+    strongest_paths_typed[ArithmeticDataType, SeedGraph.positive_margins](ctx, preferences, backend, margin_paths.data)
     var undefeated = List[Int]()
 
     for candidate in range(num_candidates):

@@ -15,6 +15,8 @@
 #include <span>        // `std::span`
 #include <bit>         // `std::countr_zero`
 #include <limits>      // `std::numeric_limits`
+#include <map>         // `std::map`
+#include <mutex>       // `std::mutex`, `std::lock_guard`
 #include <numeric>     // `std::accumulate`
 #include <optional>    // `std::optional`, `std::nullopt`
 #include <stdexcept>   // `std::runtime_error`
@@ -22,7 +24,8 @@
 #include <string>      // `std::string`
 #include <string_view> // `std::string_view`
 #include <thread>      // `std::thread::hardware_concurrency()`
-#include <type_traits> // `std::integral_constant`, `std::is_same`, `std::type_identity_t`
+#include <type_traits> // `std::integral_constant`, `std::is_integral_v`, `std::is_same`, `std::type_identity_t`
+#include <utility>     // `std::pair`, `std::move`
 #include <vector>      // `std::vector`
 
 #if defined(_OPENMP)
@@ -64,10 +67,10 @@
 #include <cuda/barrier>   // `cuda::barrier`, `cuda::device::barrier_arrive_tx`
 #include <cuda/atomic>    // `cuda::atomic_ref`, `cuda::memory_order_relaxed`, `cuda::thread_scope`
 #include <cudaTypedefs.h> // `PFN_cuTensorMapEncodeTiled_v12000`, `PFN_cuGetProcAddress_v12000`
-#include <cuda_runtime.h> // `cudaMallocManaged`, `cudaFree`, `cudaDeviceProp`, `cudaError_t`
+#include <cuda_runtime.h> // `cudaMallocManaged`, `cudaMallocAsync`, `cudaDeviceProp`, `cudaError_t`
 
 #elif defined(SCALING_ELECTIONS_WITH_HIP)
-#include <hip/hip_runtime.h> // `hipMallocManaged`, `hipFree`, `hipDeviceProp_t`, `hipError_t`
+#include <hip/hip_runtime.h> // `hipMallocManaged`, `hipMallocAsync`, `hipDeviceProp_t`, `hipError_t`
 
 #if defined(__HIP_PLATFORM_AMD__)
 #define cudaError_t                                    hipError_t
@@ -76,13 +79,25 @@
 #define cudaGetDeviceProperties                        hipGetDeviceProperties
 #define cudaDeviceProp                                 hipDeviceProp_t
 #define cudaMallocManaged                              hipMallocManaged
+#define cudaMalloc                                     hipMalloc
+#define cudaMallocAsync                                hipMallocAsync
 #define cudaFree                                       hipFree
+#define cudaFreeAsync                                  hipFreeAsync
+#define cudaDeviceGetAttribute                         hipDeviceGetAttribute
+#define cudaDevAttrMemoryPoolsSupported                hipDeviceAttributeMemoryPoolsSupported
+#define cudaDeviceGetDefaultMemPool                    hipDeviceGetDefaultMemPool
+#define cudaMemPool_t                                  hipMemPool_t
+#define cudaMemPoolSetAttribute                        hipMemPoolSetAttribute
+#define cudaMemPoolAttrReleaseThreshold                hipMemPoolAttrReleaseThreshold
 #define cudaMemGetInfo                                 hipMemGetInfo
 #define cudaMemcpy                                     hipMemcpy
 #define cudaMemcpy2D                                   hipMemcpy2D
+#define cudaMemcpy2DAsync                              hipMemcpy2DAsync
+#define cudaMemcpyAsync                                hipMemcpyAsync
 #define cudaMemcpyDeviceToHost                         hipMemcpyDeviceToHost
 #define cudaMemcpyHostToDevice                         hipMemcpyHostToDevice
 #define cudaMemset                                     hipMemset
+#define cudaMemsetAsync                                hipMemsetAsync
 #define cudaDeviceSynchronize                          hipDeviceSynchronize
 #define cudaGetLastError                               hipGetLastError
 #define cudaGetErrorString                             hipGetErrorString
@@ -158,7 +173,7 @@ struct saturated {
     SCALING_ELECTIONS_HOST_DEVICE constexpr saturated(count_t count) noexcept : value(count) {}
     SCALING_ELECTIONS_HOST_DEVICE constexpr explicit operator count_t() const noexcept { return value; }
     SCALING_ELECTIONS_HOST_DEVICE constexpr saturated operator+(saturated other) const noexcept {
-        count_t const limit = std::numeric_limits<count_t>::max();
+        count_t const limit = static_cast<count_t>(~count_t {0});
         return value > limit - other.value ? limit : value + other.value;
     }
     SCALING_ELECTIONS_HOST_DEVICE constexpr saturated& operator+=(saturated other) noexcept {
@@ -187,7 +202,7 @@ struct saturated {
 template <typename count_type_>
 struct std::numeric_limits<saturated<count_type_>> : std::numeric_limits<count_type_> {
     SCALING_ELECTIONS_HOST_DEVICE static constexpr saturated<count_type_> max() noexcept {
-        return std::numeric_limits<count_type_>::max();
+        return static_cast<count_type_>(~count_type_ {0});
     }
 };
 
@@ -197,6 +212,13 @@ concept tally_arithmetic = std::numeric_limits<scalar_type_>::is_integer &&
                            !std::numeric_limits<scalar_type_>::is_signed &&
                            (std::numeric_limits<scalar_type_>::digits > 1) &&
                            (std::numeric_limits<scalar_type_>::digits <= 64);
+
+/** The largest value of a tally arithmetic, for host and device code alike. */
+template <tally_arithmetic arithmetic_type_>
+SCALING_ELECTIONS_HOST_DEVICE constexpr arithmetic_type_ largest_count() noexcept {
+    if constexpr (std::is_integral_v<arithmetic_type_>) return static_cast<arithmetic_type_>(~arithmetic_type_ {0});
+    else return std::numeric_limits<arithmetic_type_>::max();
+}
 
 inline std::size_t checked_product(std::size_t count, std::size_t width) {
     if (width && count > std::numeric_limits<std::size_t>::max() / width)
@@ -300,14 +322,49 @@ inline strided_matrix<element_type_, index_type_> square_view( //
 
 #if defined(SCALING_ELECTIONS_WITH_GPU)
 
-/** Properties of the device the calling thread launches on. */
-inline cudaDeviceProp current_device_properties_() {
+/** Where `device_allocator` draws a device's memory from. */
+enum class device_memory_t : std::uint8_t {
+    /** The default pool, ordered on the null stream, which keeps freed memory for the next allocation. */
+    pooled_k,
+    /** Plain allocations, on a device without memory pools. */
+    plain_k,
+};
+
+/** What the launches and allocations here need to know about one device. */
+struct device_state_t {
+    cudaDeviceProp properties;
+    device_memory_t memory;
+};
+
+/** The state of the device the calling thread launches on, gathered on its first use. */
+inline device_state_t const& current_device_state_() {
+    static std::mutex mutex;
+    static std::map<int, device_state_t> states;
     int device = 0;
-    cudaDeviceProp device_properties;
-    if (cudaGetDevice(&device) != cudaSuccess || cudaGetDeviceProperties(&device_properties, device) != cudaSuccess)
+    if (cudaGetDevice(&device) != cudaSuccess) throw std::runtime_error("No CUDA devices available");
+    std::lock_guard const lock(mutex);
+    auto const found = states.find(device);
+    if (found != states.end()) return found->second;
+
+    device_state_t state {};
+    int pools = 0;
+    if (cudaGetDeviceProperties(&state.properties, device) != cudaSuccess ||
+        cudaDeviceGetAttribute(&pools, cudaDevAttrMemoryPoolsSupported, device) != cudaSuccess)
         throw std::runtime_error("No CUDA devices available");
-    return device_properties;
+    state.memory = pools ? device_memory_t::pooled_k : device_memory_t::plain_k;
+    if (state.memory == device_memory_t::pooled_k) {
+        // The pool otherwise hands its memory back to the system at every synchronization.
+        cudaMemPool_t pool;
+        std::uint64_t threshold = std::numeric_limits<std::uint64_t>::max();
+        if (cudaDeviceGetDefaultMemPool(&pool, device) != cudaSuccess ||
+            cudaMemPoolSetAttribute(pool, cudaMemPoolAttrReleaseThreshold, &threshold) != cudaSuccess)
+            throw std::runtime_error("Failed to configure the device memory pool");
+    }
+    return states.emplace(device, state).first->second;
 }
+
+/** Properties of the device the calling thread launches on. */
+inline cudaDeviceProp const& current_device_properties_() { return current_device_state_().properties; }
 
 /** Blocks of @p kernel that stay resident on the whole device at once, which is all a grid-stride launch uses. */
 template <typename kernel_type_>
@@ -355,5 +412,49 @@ struct managed_allocator {
 /** A resizable buffer both the host and the device address, whose elements start uninitialized. */
 template <typename value_type_>
 using managed_vector = std::vector<value_type_, managed_allocator<value_type_>>;
+
+/**
+ *  Draws device memory in order on the null stream every launch here uses, so neither call stalls the host,
+ *  or plainly on a device without memory pools.
+ */
+template <typename value_type_>
+struct device_allocator {
+    using value_t = value_type_;
+    using value_type = value_t;
+
+    device_allocator() = default;
+    template <typename other_type_>
+    constexpr device_allocator(device_allocator<other_type_> const&) noexcept {}
+
+    value_t* allocate(std::size_t count) {
+        std::size_t const bytes = checked_product(count, sizeof(value_t));
+        void* pointer = nullptr;
+        cudaError_t const error = current_device_state_().memory == device_memory_t::pooled_k
+                                      ? cudaMallocAsync(&pointer, bytes, nullptr)
+                                      : cudaMalloc(&pointer, bytes);
+        if (error != cudaSuccess) throw std::bad_alloc();
+        return static_cast<value_t*>(pointer);
+    }
+
+    void deallocate(value_t* pointer, std::size_t) noexcept {
+        if (current_device_state_().memory == device_memory_t::pooled_k) cudaFreeAsync(pointer, nullptr);
+        else cudaFree(pointer);
+    }
+
+    /** Leaves elements uninitialized, since the host cannot write device memory. */
+    template <typename other_type_>
+    void construct(other_type_*) const noexcept {
+        static_assert(std::is_trivially_default_constructible_v<other_type_>, "Elements are left uninitialized");
+    }
+
+    template <typename other_type_>
+    bool operator==(device_allocator<other_type_> const&) const noexcept {
+        return true;
+    }
+};
+
+/** A buffer only the device addresses, whose elements start uninitialized until a copy fills them. */
+template <typename value_type_>
+using device_vector = std::vector<value_type_, device_allocator<value_type_>>;
 
 #endif
