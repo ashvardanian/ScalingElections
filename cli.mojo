@@ -55,20 +55,20 @@ def check_matrix[CountDataType: DType](actual: VoteMatrix[CountDataType], expect
 
 
 def run_ballots(
-    n: Int, voters: Int, seed: Int, selector: String, warmup: Int, repeat: Int, requested: ScoreType
+    ctx: DeviceContext, n: Int, voters: Int, seed: Int, selector: String, warmup: Int, repeat: Int, requested: ScoreType
 ) raises:
     var score_type = ballots.resolve_tally_score_type(ballots.VoterWeight(voters), requested)
     print(t"Score bits: {score_type.bits()}")
 
     def run_with[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> None:
-        run_ballots_typed[ArithmeticDataType, ArithmeticMode](n, voters, seed, selector, warmup, repeat)
+        run_ballots_typed[ArithmeticDataType, ArithmeticMode](ctx, n, voters, seed, selector, warmup, repeat)
 
     with_score_type(score_type, run_with)
 
 
 def run_ballots_typed[
     ArithmeticDataType: DType, ArithmeticMode: Arithmetic
-](n: Int, voters: Int, seed: Int, selector: String, warmup: Int, repeat: Int) raises:
+](ctx: DeviceContext, n: Int, voters: Int, seed: Int, selector: String, warmup: Int, repeat: Int) raises:
     var rankings = List[ballots.CandidateIndex](length=n * voters, fill=0)
     var generator = Random(seed=UInt64(seed))
     for ballot in range(voters):
@@ -95,14 +95,13 @@ def run_ballots_typed[
 
         def calculate() raises {imm} -> VoteMatrix[ArithmeticDataType]:
             var result = VoteMatrix[ArithmeticDataType](n)
-            if backend == Backend.cpu or ballots.tally_dense_serves_gpu[ArithmeticDataType, ArithmeticMode](
-                DeviceContext(), n
-            ):
+            if backend == Backend.cpu or ballots.tally_dense_serves_gpu[ArithmeticDataType, ArithmeticMode](ctx, n):
                 ballots.tally_ballots[ArithmeticDataType, ArithmeticMode](
-                    ballots.ballot_span(rankings), voters, n, result.data, backend=backend
+                    ctx, ballots.ballot_span(rankings), voters, n, result.data, backend=backend
                 )
                 return result^
             ballots.tally_ragged_relations[ArithmeticDataType, ArithmeticMode, ballots.PairwiseRelation.preference](
+                ctx,
                 ballots.RaggedBallots(
                     ballots.ballot_span(rankings),
                     ballots.ballot_span(offsets),
@@ -138,20 +137,25 @@ def run_ballots_typed[
 
 
 def run_schulze(
-    preferences: VoteMatrix[BENCHMARK_COUNT_TYPE], selector: String, warmup: Int, repeat: Int, score_type: ScoreType
+    ctx: DeviceContext,
+    preferences: VoteMatrix[BENCHMARK_COUNT_TYPE],
+    selector: String,
+    warmup: Int,
+    repeat: Int,
+    score_type: ScoreType,
 ) raises:
     var resolved = schulze.resolve_score_type[schulze.SeedGraph.winning_votes](preferences.view(), score_type)
     print(t"Score bits: {resolved.bits()}")
 
     def run_with[ArithmeticDataType: DType, ArithmeticMode: Arithmetic]() raises {imm} -> None:
-        run_schulze_typed[ArithmeticDataType](preferences, selector, warmup, repeat)
+        run_schulze_typed[ArithmeticDataType](ctx, preferences, selector, warmup, repeat)
 
     with_score_type(resolved, run_with)
 
 
 def run_schulze_typed[
     ArithmeticDataType: DType
-](preferences: VoteMatrix[BENCHMARK_COUNT_TYPE], selector: String, warmup: Int, repeat: Int) raises:
+](ctx: DeviceContext, preferences: VoteMatrix[BENCHMARK_COUNT_TYPE], selector: String, warmup: Int, repeat: Int) raises:
     var baseline = VoteMatrix[ArithmeticDataType](0)
     var backends: List[Backend] = [Backend.cpu, Backend.gpu]
     var n = preferences.num_candidates
@@ -165,7 +169,7 @@ def run_schulze_typed[
         def calculate() raises {imm} -> VoteMatrix[ArithmeticDataType]:
             var paths = VoteMatrix[ArithmeticDataType](n)
             schulze.strongest_paths_typed[ArithmeticDataType, schulze.SeedGraph.winning_votes](
-                preferences.view(), backend, paths.data
+                ctx, preferences.view(), backend, paths.data
             )
             return paths^
 
@@ -186,7 +190,12 @@ def run_schulze_typed[
 
 
 def run_kemeny(
-    preferences: VoteMatrix[BENCHMARK_COUNT_TYPE], selector: String, warmup: Int, repeat: Int, score_type: ScoreType
+    ctx: DeviceContext,
+    preferences: VoteMatrix[BENCHMARK_COUNT_TYPE],
+    selector: String,
+    warmup: Int,
+    repeat: Int,
+    score_type: ScoreType,
 ) raises:
     print(t"Score bits: {kemeny.resolve_score_type(preferences.view(), score_type).bits()}")
     var baseline = KemenySolution(List[Int](), List[Int](), kemeny.RankingMultiplicity.unique, 0)
@@ -200,7 +209,7 @@ def run_kemeny(
             continue
 
         def calculate() raises {imm} -> KemenySolution:
-            return kemeny.compute_kemeny_ranking(preferences.view(), backend=backend, score_type=score_type)
+            return kemeny.compute_kemeny_ranking(ctx, preferences.view(), backend=backend, score_type=score_type)
 
         var result = profile[KemenySolution](backend.name(), calculate, warmup, repeat, 0, "")
         var score = ballots.VoterWeight(0)
@@ -364,14 +373,18 @@ def main() raises:
         kemeny.require_kemeny_width(n)
     print(t"Method: {method} Candidates: {n} Voters: {voters} Seed: {seed}")
     print(t"Warmup: {warmup} Repeat: {repeat} CPU threads: {num_logical_cores()}")
+    # One context serves every timed call, so none of them pays for opening a device.
+    var ctx = DeviceContext(api="cpu")
     if selected_by(selector, "GPU") and has_accelerator():
-        var ctx = DeviceContext()
+        ctx = DeviceContext()
         print(t"GPU: {ctx.name()}")
     if method == "ballots":
-        run_ballots(n, voters, seed, selector, warmup, repeat, score_type)
+        run_ballots(ctx, n, voters, seed, selector, warmup, repeat, score_type)
         return
     var preferences = ballots.generate_random_preferences[BENCHMARK_COUNT_TYPE](n, voters, seed)
-    var solvers = StringDict[def(VoteMatrix[BENCHMARK_COUNT_TYPE], String, Int, Int, ScoreType) raises thin -> None]()
+    var solvers = StringDict[
+        def(DeviceContext, VoteMatrix[BENCHMARK_COUNT_TYPE], String, Int, Int, ScoreType) raises thin -> None
+    ]()
     solvers["schulze"] = run_schulze
     solvers["kemeny"] = run_kemeny
-    solvers[method](preferences, selector, warmup, repeat, score_type)
+    solvers[method](ctx, preferences, selector, warmup, repeat, score_type)
