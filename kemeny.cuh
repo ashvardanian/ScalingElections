@@ -392,7 +392,7 @@ __global__ void kemeny_trace_cuda_(kemeny_device_sums<arithmetic_type_> sums, ar
     subset_mask_t const everyone = (subset_mask_t {1} << num_candidates) - 1;
     arithmetic_t const optimum = costs[everyone];
     trace[num_candidates] = static_cast<std::uint64_t>(optimum);
-    if (optimum == std::numeric_limits<arithmetic_t>::max()) return;
+    if (optimum == largest_count<arithmetic_t>()) return;
 
     trace[num_candidates + 1] = static_cast<std::uint64_t>(ranking_multiplicity_t::unique_k);
     for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
