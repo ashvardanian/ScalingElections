@@ -368,7 +368,7 @@ __global__ void kemeny_layer_cuda_(                                      //
     candidate_index_t const num_candidates = binomials.rows - 1;
     subset_mask_t const subset = kemeny_unrank_colex_(binomials, seated, rank);
 
-    arithmetic_t best = std::numeric_limits<arithmetic_t>::max();
+    arithmetic_t best = largest_count<arithmetic_t>();
     for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
         subset_mask_t const bit = subset_mask_t {1} << candidate;
         if (!(subset & bit)) continue;
@@ -392,7 +392,7 @@ __global__ void kemeny_trace_cuda_(kemeny_device_sums<arithmetic_type_> sums, ar
     subset_mask_t const everyone = (subset_mask_t {1} << num_candidates) - 1;
     arithmetic_t const optimum = costs[everyone];
     trace[num_candidates] = static_cast<std::uint64_t>(optimum);
-    if (optimum == std::numeric_limits<arithmetic_t>::max()) return;
+    if (optimum == largest_count<arithmetic_t>()) return;
 
     trace[num_candidates + 1] = static_cast<std::uint64_t>(ranking_multiplicity_t::unique_k);
     for (candidate_index_t candidate = 0; candidate < num_candidates; candidate++) {
