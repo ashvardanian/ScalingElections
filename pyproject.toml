@@ -3,7 +3,7 @@ authors = [
   { name = "Ash Vardanian", email = "1983160+ashvardanian@users.noreply.github.com" },
 ]
 dependencies = ["numba>=0.67", "numpy>=2.0"]
-description = "ScalingElections: Condorcet Voting at GPU Speed — Schulze as semiring matrix multiplication, Kemeny-Young as exact NP-hard search"
+description = "Condorcet voting at GPU speed, with Schulze as semiring matrix multiplication"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 name = "ScalingElections"

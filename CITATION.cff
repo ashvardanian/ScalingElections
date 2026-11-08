@@ -1,18 +1,11 @@
 cff-version: 1.2.0
-title: >-
-  ScalingElections: Condorcet Voting at GPU Speed —
-  Schulze as semiring matrix multiplication, Kemeny-Young as exact NP-hard search
+title: "ScalingElections: Condorcet Voting at GPU Speed, with Schulze as Semiring Matrix Multiplication"
 message: "If you use this software, please cite it as below."
 type: software
 license: Apache-2.0
-version: 0.2.0
-doi: 10.5281/zenodo.22073377
 repository-code: https://github.com/ashvardanian/ScalingElections
 url: https://ashvardanian.com/posts/scaling-elections/
-identifiers:
-  - type: doi
-    value: 10.5281/zenodo.22073378
-    description: "v0.2.0 — version DOI"
+doi: 10.5281/zenodo.22073377
 abstract: >-
   Voting at scale looks like a graph problem and computes like a dense one. The Schulze method closes
   the pairwise tally under a max-min recurrence, and that recurrence is matrix multiplication with
@@ -24,7 +17,6 @@ abstract: >-
   reordering, only the speed does, so the exact winner arrives at throughputs usually reserved for
   sampling. Split Cycle rides the identical kernel and differs only in the edge weights fed to it,
   winning votes for Schulze and positive margins for Split Cycle.
-
   Kemeny-Young admits no such semiring. Its consensus ranking is NP-hard, and it is solved here
   exactly rather than approximately, by dynamic programming over candidate subsets whose table is
   split into low and high halves so it stays cache-resident while the score table streams past. That
@@ -35,16 +27,16 @@ abstract: >-
   implementation spanning CPU, SIMD, and GPU paths, all validated against serial NumPy and Numba
   references.
 keywords:
-  - social-choice
+  - social choice
   - voting
-  - schulze-method
-  - split-cycle
+  - schulze method
+  - split cycle
   - kemeny-young
   - condorcet
   - semiring
-  - widest-path
+  - widest path
   - floyd-warshall
-  - dynamic-programming
+  - dynamic programming
   - gpu
   - cuda
   - rocm
@@ -58,10 +50,9 @@ authors:
     orcid: https://orcid.org/0000-0002-4882-1815
 
 references:
-  - type: blog
+  - type: article
     title: "Scaling Elections with GPUs and Mojo across Nvidia and AMD"
     authors:
       - family-names: Vardanian
         given-names: Ash
     url: https://ashvardanian.com/posts/scaling-elections/
-    year: 2025

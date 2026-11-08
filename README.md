@@ -246,7 +246,7 @@ If ScalingElections helps your research or product, please cite it:
 ```bibtex
 @software{Vardanian_ScalingElections,
   author = {Vardanian, Ash},
-  title = {{ScalingElections: Condorcet Voting at GPU Speed — Schulze as semiring matrix multiplication, Kemeny-Young as exact NP-hard search}},
+  title = {{ScalingElections: Condorcet Voting at GPU Speed, with Schulze as Semiring Matrix Multiplication}},
   doi = {10.5281/zenodo.22073377},
   url = {https://github.com/ashvardanian/ScalingElections},
   license = {Apache-2.0}
