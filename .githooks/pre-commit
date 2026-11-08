@@ -8,6 +8,13 @@
 # Install with `pixi run hooks`; bypass knowingly with `git commit --no-verify`.
 
 set -euo pipefail
+
+# CITATION.cff cites the concept DOI, which spans every release, so it never carries a version.
+if git show :CITATION.cff 2> /dev/null | grep -q '^version:'; then
+    echo "pre-commit: CITATION.cff carries no version; the concept DOI spans every release." >&2
+    exit 1
+fi
+
 shopt -s lastpipe
 
 # Fails the commit when its input holds any `path:line: reason` line, printing them all.
