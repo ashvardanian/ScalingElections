@@ -7,23 +7,22 @@ so this is the Held-Karp subset dynamic program instead: `O(n * 2^n)` time again
 memory, exact rather than approximate, and practical to roughly two dozen candidates.
 """
 
-from std.bit import count_trailing_zeros
+from std.bit import count_trailing_zeros, pop_count
+from std.memory import AddressSpace, stack_allocation
 from std.sys import num_logical_cores, size_of
 
 from max.algorithm import parallelize
-from max.gpu import block_dim, block_idx, thread_idx
+from max.gpu import barrier, block_idx, thread_idx
 from max.gpu.host import DeviceBuffer, DeviceContext
 
 from ballots import (
     Arithmetic,
     Backend,
     CandidateIndex,
-    GPU_BLOCK_SIZE,
     ScoreType,
     VoteMatrixView,
     VoterWeight,
     add_counts,
-    divide_round_up,
     with_score_type,
 )
 
@@ -487,25 +486,72 @@ def compute_kemeny_ranking_cpu[
 # region GPU
 
 
-def kemeny_layer_kernel[
+comptime KEMENY_GROUP_BITS = 8
+"""Low bits covered by one block, with one thread per low-mask state."""
+
+
+def kemeny_group_kernel[
     ArithmeticDataType: DType, ArithmeticMode: Arithmetic
 ](
     sums: Pointer[SIMD[ArithmeticDataType, 1], ImmUntrackedOrigin],
     binomials: Pointer[BinomialCount, ImmUntrackedOrigin],
     costs: Pointer[SIMD[ArithmeticDataType, 1], MutUntrackedOrigin],
     num_candidates_arg: CandidateIndex,
-    seated_arg: CandidateIndex,
-    layer_states_arg: SubsetRank,
+    high_seated_arg: CandidateIndex,
+    low_bits_arg: CandidateIndex,
 ):
-    """Fills every subset that seats `seated_arg` candidates, one thread to a colex rank."""
-    var rank = SubsetRank(Int(block_idx.x) * Int(block_dim.x) + Int(thread_idx.x))
-    if rank >= layer_states_arg:
-        return
+    """
+    Fills a contiguous group of subsets sharing the same high bits in shared memory.
+
+    Removing a high bit reaches a completed group in the preceding high-population layer.
+    Removing a low bit stays inside this block, where barriers order the low-population layers.
+    Every thread reaches each barrier, including threads outside a small field's low mask.
+    """
+    comptime Count = SIMD[ArithmeticDataType, 1]
+    var local = stack_allocation[1 << KEMENY_GROUP_BITS, Count, address_space=AddressSpace.SHARED]()
+    var shared_prefix = stack_allocation[1, SubsetMask, address_space=AddressSpace.SHARED]()
     var num_candidates = Int(num_candidates_arg)
-    var subset = kemeny_unrank_colex(binomials, num_candidates, Int(seated_arg), rank)
-    costs[unsafe_offset=Int(subset)] = kemeny_best_cost(
-        KemenySumsView[ArithmeticDataType, ArithmeticMode](sums, num_candidates), costs, subset
-    )
+    var low_bits = Int(low_bits_arg)
+    var low = Int(thread_idx.x)
+    if low == 0:
+        shared_prefix[unsafe_offset=0] = kemeny_unrank_colex(
+            binomials, num_candidates - low_bits, Int(high_seated_arg), SubsetRank(block_idx.x)
+        ) << SubsetMask(low_bits)
+    barrier()
+
+    var prefix = shared_prefix[unsafe_offset=0]
+    var sums_view = KemenySumsView[ArithmeticDataType, ArithmeticMode](sums, num_candidates)
+    var active = low < (1 << low_bits)
+    if active:
+        var best = Count.MAX
+        if prefix == 0 and low == 0:
+            best = 0
+        var members = prefix
+        while members:
+            var candidate = Int(count_trailing_zeros(members))
+            var rest = (prefix ^ (SubsetMask(1) << SubsetMask(candidate))) | SubsetMask(low)
+            var score = add_counts[ArithmeticMode](costs[unsafe_offset=Int(rest)], sums_view.against(candidate, rest))
+            best = min(best, score)
+            members &= members - 1
+        local[unsafe_offset=low] = best
+    barrier()
+
+    for seated in range(1, low_bits + 1):
+        if active and pop_count(low) == seated:
+            var best = local[unsafe_offset=low]
+            var members = SubsetMask(low)
+            while members:
+                var candidate = Int(count_trailing_zeros(members))
+                var rest_low = low ^ (1 << candidate)
+                var score = add_counts[ArithmeticMode](
+                    local[unsafe_offset=rest_low], sums_view.against(candidate, prefix | SubsetMask(rest_low))
+                )
+                best = min(best, score)
+                members &= members - 1
+            local[unsafe_offset=low] = best
+        barrier()
+    if active:
+        costs[unsafe_offset=Int(prefix | SubsetMask(low))] = local[unsafe_offset=low]
 
 
 def kemeny_trace_kernel[
@@ -527,13 +573,15 @@ def compute_kemeny_costs_gpu[
 ]:
     """Builds the device cost table, returning it beside the device sums needed to trace it."""
     var num_candidates = sums.num_candidates
-    var binomials = kemeny_binomials(num_candidates)
+    var low_bits = min(num_candidates, KEMENY_GROUP_BITS)
+    var high_bits = num_candidates - low_bits
+    var binomials = kemeny_binomials(high_bits)
     var states = 1 << num_candidates
     var wanted_bytes = (states + len(sums.values)) * size_of[SIMD[ArithmeticDataType, 1]]() + len(binomials) * size_of[
         BinomialCount
     ]()
 
-    # Unified memory oversubscribes rather than failing, so an unaffordable table is refused here.
+    # Refuse an unaffordable table before allocating any device buffers.
     var free_bytes = Int(ctx.get_memory_info()[0])
     if wanted_bytes > free_bytes:
         raise Error(
@@ -546,18 +594,17 @@ def compute_kemeny_costs_gpu[
     var costs = ctx.enqueue_create_buffer[ArithmeticDataType](states)
     ctx.enqueue_copy(dst_buf=device_sums, src_ptr=sums.values.unsafe_ptr())
     ctx.enqueue_copy(dst_buf=device_binomials, src_ptr=binomials.unsafe_ptr())
-    costs.enqueue_fill(0)
-    for seated in range(1, num_candidates + 1):
-        var layer_states = kemeny_layer_states(binomials, num_candidates, seated)
-        ctx.enqueue_function[kemeny_layer_kernel[ArithmeticDataType, ArithmeticMode]](
+    for seated in range(high_bits + 1):
+        var groups = kemeny_layer_states(binomials, high_bits, seated)
+        ctx.enqueue_function[kemeny_group_kernel[ArithmeticDataType, ArithmeticMode]](
             device_sums.unsafe_ptr(),
             device_binomials.unsafe_ptr(),
             costs.unsafe_ptr(),
             CandidateIndex(num_candidates),
             CandidateIndex(seated),
-            layer_states,
-            grid_dim=(divide_round_up(Int(layer_states), GPU_BLOCK_SIZE), 1, 1),
-            block_dim=(GPU_BLOCK_SIZE, 1, 1),
+            CandidateIndex(low_bits),
+            grid_dim=(Int(groups), 1, 1),
+            block_dim=(1 << KEMENY_GROUP_BITS, 1, 1),
         )
     ctx.synchronize()
     _ = binomials^
@@ -567,7 +614,7 @@ def compute_kemeny_costs_gpu[
 def compute_kemeny_trace_gpu[
     StoredCountDataType: DType, //, ArithmeticDataType: DType, ArithmeticMode: Arithmetic
 ](ctx: DeviceContext, preferences: VoteMatrixView[StoredCountDataType, _]) raises -> List[KemenyTraceWord]:
-    """Fills the cost table on the GPU, one launch per population count, and traces it there."""
+    """Fills the cost table with one launch per high-mask population count and traces it on the GPU."""
     require_kemeny_score_range[ArithmeticDataType, ArithmeticMode](preferences)
     var num_candidates = preferences.num_candidates
     var sums = KemenySums[ArithmeticDataType, ArithmeticMode](preferences)
@@ -590,7 +637,11 @@ def compute_kemeny_trace_gpu[
 def compute_kemeny_ranking_gpu[
     StoredCountDataType: DType, //, ArithmeticDataType: DType, ArithmeticMode: Arithmetic
 ](ctx: DeviceContext, preferences: VoteMatrixView[StoredCountDataType, _]) raises -> KemenySolution:
-    """Solves exact consensus on the GPU, one launch per subset population count."""
+    """
+    Solves exact consensus on the GPU, filling related subsets together in shared memory.
+
+    One launch handles each high-mask population count; the ranking is traced on the GPU.
+    """
     return kemeny_solution_from_trace[ArithmeticDataType](
         compute_kemeny_trace_gpu[ArithmeticDataType, ArithmeticMode](ctx, preferences)
     )

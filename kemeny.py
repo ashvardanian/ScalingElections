@@ -67,6 +67,7 @@ def kemeny_subset_sums(
 
     One table would be `n * 2^n` wide. Splitting the subset into a low and a high half makes
     two of `n * 2^(n/2)`, small enough to stay in cache while the score table streams past.
+    Each subset is filled once from the subset without its highest member.
 
     Space complexity: O(n * 2^(n/2)), where n is the number of candidates.
     Time complexity: O(n * 2^(n/2)), where n is the number of candidates.
@@ -79,15 +80,13 @@ def kemeny_subset_sums(
         for offset in range(low_bits):
             bit = 1 << offset
             votes = counts[candidate, offset]
-            for subset in range(bit, 1 << low_bits):
-                if subset & bit:
-                    low[candidate, subset] = add(low[candidate, subset ^ bit], votes)
+            for subset in range(bit, bit << 1):
+                low[candidate, subset] = add(low[candidate, subset ^ bit], votes)
         for offset in range(high_bits):
             bit = 1 << offset
             votes = counts[candidate, low_bits + offset]
-            for subset in range(bit, 1 << high_bits):
-                if subset & bit:
-                    high[candidate, subset] = add(high[candidate, subset ^ bit], votes)
+            for subset in range(bit, bit << 1):
+                high[candidate, subset] = add(high[candidate, subset ^ bit], votes)
     return low, high
 
 
@@ -207,14 +206,26 @@ def kemeny_costs(
             subset = kemeny_unrank_colex(binomials, num_candidates, seated, first)
             for _ in range(first, last):
                 best = unreachable
-                for candidate in range(num_candidates):
-                    bit = 1 << candidate
-                    if not subset & bit:
-                        continue
-                    rest = subset ^ bit
-                    score = kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add)
-                    if score < best:
-                        best = score
+                # A fixed candidate count lets the wide-score reduction vectorize.
+                if costs.itemsize == 8:
+                    for candidate in range(num_candidates):
+                        bit = 1 << candidate
+                        if not subset & bit:
+                            continue
+                        rest = subset ^ bit
+                        score = kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add)
+                        if score < best:
+                            best = score
+                else:
+                    members = subset
+                    while members:
+                        bit = members & -members
+                        candidate = trailing_zeros(members)
+                        rest = subset ^ bit
+                        score = kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add)
+                        if score < best:
+                            best = score
+                        members &= members - 1
                 costs[subset] = best
                 subset = kemeny_next_colex(subset)
 
