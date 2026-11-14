@@ -5,6 +5,7 @@ Package metadata lives in `pyproject.toml`; this file only picks a toolkit and d
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -81,9 +82,16 @@ def toolkit_library_directory(home: str) -> str:
 
 
 def toolkit_architectures(toolkit: DeviceToolkit) -> list[str]:
-    """Targets from the toolkit's environment variable, else its defaults; `native` names the local device."""
-    requested = [code.strip() for code in os.environ.get(toolkit.architectures_variable, "").split(",")]
-    return [code for code in requested if code] or list(toolkit.default_architectures)
+    """The toolkit's environment variable takes `all` for the defaults, `native` for the local device, or one code."""
+    requested = os.environ.get(toolkit.architectures_variable, "all")
+    if requested == "all":
+        return list(toolkit.default_architectures)
+    if requested == "native" or re.fullmatch(r"[0-9]+[af]?|gfx[0-9a-f]+", requested):
+        return [requested]
+    example = toolkit.default_architectures[-1]
+    raise ValueError(
+        f"{toolkit.architectures_variable} takes all, native or one code like {example}, not `{requested}`"
+    )
 
 
 def detect_toolkit() -> Toolkit:
@@ -99,9 +107,13 @@ def device_flags(name: Toolkit, architectures: list[str]) -> list[str]:
     """Code-generation and host-compiler flags for one device driver."""
     match name:
         case Toolkit.cuda:
-            # SASS for every target and PTX only for the newest, so newer drivers can JIT forward.
-            gencodes = [f"-gencode=arch=compute_{code},code=sm_{code}" for code in architectures]
-            gencodes.append(f"-gencode=arch=compute_{architectures[-1]},code=compute_{architectures[-1]}")
+            if architectures == ["native"]:
+                # NVCC detects the visible devices and emits SASS only for their architectures.
+                gencodes = ["-arch=native"]
+            else:
+                # SASS for every target and PTX only for the newest, so newer drivers can JIT forward.
+                gencodes = [f"-gencode=arch=compute_{code},code=sm_{code}" for code in architectures]
+                gencodes.append(f"-gencode=arch=compute_{architectures[-1]},code=compute_{architectures[-1]}")
             host_compiler = os.environ.get("CUDAHOSTCXX", "g++")
             return ["-ccbin", host_compiler, *gencodes, "-Xcompiler", "-fPIC,-fopenmp,-march=native"]
         case Toolkit.hip:
