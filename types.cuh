@@ -24,7 +24,7 @@
 #include <string>      // `std::string`
 #include <string_view> // `std::string_view`
 #include <thread>      // `std::thread::hardware_concurrency()`
-#include <type_traits> // `std::integral_constant`, `std::is_same`, `std::type_identity_t`
+#include <type_traits> // `std::integral_constant`, `std::is_integral_v`, `std::is_same`, `std::type_identity_t`
 #include <utility>     // `std::pair`, `std::move`
 #include <vector>      // `std::vector`
 
