@@ -206,26 +206,15 @@ def kemeny_costs(
             subset = kemeny_unrank_colex(binomials, num_candidates, seated, first)
             for _ in range(first, last):
                 best = unreachable
-                # A fixed candidate count lets the wide-score reduction vectorize.
-                if costs.itemsize == 8:
-                    for candidate in range(num_candidates):
-                        bit = 1 << candidate
-                        if not subset & bit:
-                            continue
-                        rest = subset ^ bit
-                        score = kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add)
-                        if score < best:
-                            best = score
-                else:
-                    members = subset
-                    while members:
-                        bit = members & -members
-                        candidate = trailing_zeros(members)
-                        rest = subset ^ bit
-                        score = kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add)
-                        if score < best:
-                            best = score
-                        members &= members - 1
+                members = subset
+                while members:
+                    bit = members & -members
+                    candidate = trailing_zeros(members)
+                    rest = subset ^ bit
+                    score = kemeny_seat_last(costs, low, high, low_bits, candidate, rest, add)
+                    if score < best:
+                        best = score
+                    members &= members - 1
                 costs[subset] = best
                 subset = kemeny_next_colex(subset)
 
